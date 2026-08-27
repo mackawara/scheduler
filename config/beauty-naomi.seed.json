@@ -1,0 +1,37 @@
+{
+  "app": {
+    "slug": "beauty-naomi",
+    "name": "Beauty Naomi",
+    "timezone": "Africa/Harare",
+    "address": null,
+    "holdTtlMinutes": 5,
+    "rescheduleCutoffHours": 4,
+    "slotIntervalMinutes": 15
+  },
+  "adminEmail": "admin@beautynaomi.local",
+  "services": [
+    {
+      "name": "Hair Wash",
+      "description": "Starter catalog entry; replace with the salon's confirmed catalog.",
+      "baseDurationMinutes": 60,
+      "bufferDurationMinutes": 15,
+      "resourceType": "Stylist",
+      "priceCents": 0,
+      "currency": "USD"
+    }
+  ],
+  "staff": [
+    {
+      "name": "Naomi",
+      "resourceType": "Stylist",
+      "workingHours": [
+        { "dayOfWeek": 1, "startsAt": "09:00", "endsAt": "17:00" },
+        { "dayOfWeek": 2, "startsAt": "09:00", "endsAt": "17:00" },
+        { "dayOfWeek": 3, "startsAt": "09:00", "endsAt": "17:00" },
+        { "dayOfWeek": 4, "startsAt": "09:00", "endsAt": "17:00" },
+        { "dayOfWeek": 5, "startsAt": "09:00", "endsAt": "17:00" },
+        { "dayOfWeek": 6, "startsAt": "09:00", "endsAt": "14:00" }
+      ]
+    }
+  ]
+}

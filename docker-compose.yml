@@ -1,0 +1,39 @@
+services:
+  mongodb:
+    image: mongo:8
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 15s
+      retries: 10
+      start_period: 90s
+    volumes:
+      - scheduler_mongodb:/data/db
+
+  mongo-init:
+    image: mongo:8
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["mongosh", "--host", "mongodb:27017", "--quiet", "--eval"]
+    command:
+      - >-
+        try { rs.status() } catch (error) {
+          rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]})
+        }
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - scheduler_redis:/data
+
+volumes:
+  scheduler_mongodb:
+  scheduler_redis:

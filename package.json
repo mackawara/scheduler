@@ -1,0 +1,38 @@
+{
+  "name": "scheduler-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-tenant scheduling API with dynamic availability and collision-safe bookings",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "worker": "tsx src/worker.ts",
+    "app:create": "tsx scripts/create-app.ts",
+    "seed:beauty-naomi": "tsx scripts/seed-beauty-naomi.ts",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "ioredis": "^5.8.2",
+    "luxon": "^3.7.2",
+    "mongoose": "^9.0.2",
+    "winston": "^3.19.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/luxon": "^3.7.1",
+    "@types/node": "^24.10.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
