@@ -1,4 +1,4 @@
-import { createApiKey, encryptJson, hashPassword } from '../src/lib/crypto.js';
+import { createApiKey, createPublicKey, encryptJson, hashPassword } from '../src/lib/crypto.js';
 import { closeDatabase, connectDatabase } from '../src/db.js';
 import { AdminUserModel, AppModel } from '../src/models.js';
 import { env } from '../src/config.js';
@@ -24,6 +24,7 @@ try {
   await Promise.all([AppModel.createIndexes(), AdminUserModel.createIndexes()]);
   if (await AppModel.exists({ slug })) throw new Error(`An app with slug '${slug}' already exists`);
   const apiKey = createApiKey();
+  const publicKey = createPublicKey();
   const webhookUrl = argument('webhook-url') ?? null;
   const webhookSecret = webhookUrl ? createApiKey().key : null;
   const app = await AppModel.create({
@@ -32,6 +33,8 @@ try {
     timezone,
     apiKeyPrefix: apiKey.prefix,
     apiKeyHash: apiKey.hash,
+    publicKeyPrefix: publicKey.prefix,
+    publicKeyHash: publicKey.hash,
     webhookUrl,
     webhookSecretEncrypted: webhookSecret
       ? encryptJson({ secret: webhookSecret }, env.encryptionKey)
@@ -44,7 +47,8 @@ try {
     role: 'ADMIN',
   });
   console.log(`App id: ${app._id.toString()}`);
-  console.log(`API key (save now): ${apiKey.key}`);
+  console.log(`Secret API key (save now, server-side only): ${apiKey.key}`);
+  console.log(`Publishable key (safe for browser bundles): ${publicKey.key}`);
   if (webhookSecret) console.log(`Webhook signing secret (save now): ${webhookSecret}`);
 } finally {
   await closeDatabase();
