@@ -13,13 +13,25 @@ export type AppTenant = {
 
 export type AuthPrincipal =
   | { type: 'ADMIN'; id: string; appId: string; role: 'ADMIN' | 'STAFF' }
-  | { type: 'CUSTOMER'; id: string; appId: string; appointmentId: string };
+  | {
+      type: 'CUSTOMER';
+      id: string;
+      appId: string;
+      /** Set when the token was minted for a single booking via that booking's OTP. */
+      appointmentId?: string;
+      /** Set when the token represents the whole customer (phone OTP or account login). */
+      customerId?: string;
+    };
+
+/** Which class of API key authenticated the request. */
+export type KeyScope = 'PUBLIC' | 'SECRET';
 
 declare global {
   namespace Express {
     interface Request {
       tenant?: AppTenant;
       principal?: AuthPrincipal;
+      keyScope?: KeyScope;
     }
   }
 }

@@ -9,6 +9,7 @@ type TokenClaims = {
   type: 'ADMIN' | 'CUSTOMER';
   role?: 'ADMIN' | 'STAFF';
   appointmentId?: string;
+  customerId?: string;
   iat: number;
   exp: number;
 };

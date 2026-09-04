@@ -18,7 +18,8 @@ import {
   Types,
 } from '../models.js';
 import { invalidateAvailability, withDistributedLock } from '../redis.js';
-import { claimRange } from '../services/booking-service.js';
+import { cancelBooking, claimRange, getBooking, rescheduleBooking } from '../services/booking-service.js';
+import { searchSlots } from '../services/slot-search-service.js';
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, 'Must be a MongoDB ObjectId');
 const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
@@ -323,5 +324,72 @@ adminRoutes.get('/bookings', async (req, res) => {
           : null,
       localStart: DateTime.fromJSDate(booking.startsAt).setZone(req.tenant!.timezone).toISO(),
     })),
+  });
+});
+
+adminRoutes.get('/services', async (req, res) => {
+  const services = await ServiceModel.find({ appId: req.tenant!.id }).sort({ name: 1 }).lean();
+  res.json({
+    data: services.map((service) => ({
+      id: service._id.toString(),
+      name: service.name,
+      description: service.description,
+      baseDurationMinutes: service.baseDurationMinutes,
+      bufferDurationMinutes: service.bufferDurationMinutes,
+      resourceType: service.resourceType,
+      priceCents: service.priceCents,
+      currency: service.currency,
+      active: service.active,
+    })),
+  });
+});
+
+adminRoutes.get('/staff', async (req, res) => {
+  const staff = await StaffModel.find({ appId: req.tenant!.id }).sort({ name: 1 }).lean();
+  res.json({
+    data: staff.map((member) => ({
+      id: member._id.toString(),
+      name: member.name,
+      resourceType: member.resourceType,
+      workingHours: member.workingHours,
+      active: member.active,
+    })),
+  });
+});
+
+adminRoutes.get('/bookings/:id', async (req, res) => {
+  res.json({ data: await getBooking(req.tenant!, objectId.parse(req.params.id)) });
+});
+
+/** Times the booking could move to on a given day, for the reschedule picker. */
+adminRoutes.get('/bookings/:id/reschedule-options', async (req, res) => {
+  const bookingId = objectId.parse(req.params.id);
+  const query = z.object({ date: z.iso.date() }).parse(req.query);
+  const booking = await AppointmentModel.findOne({ _id: bookingId, appId: req.tenant!.id }).lean();
+  if (!booking) throw notFound('Booking');
+  const search = await searchSlots(req.tenant!, {
+    serviceId: booking.serviceId.toString(),
+    date: query.date,
+    staffId: booking.staffId.toString(),
+  });
+  res.json({ data: search });
+});
+
+adminRoutes.post('/bookings/:id/cancel', async (req, res) => {
+  const body = z.object({ reason: z.string().trim().max(300).optional() }).parse(req.body);
+  res.json({
+    data: await cancelBooking(req.tenant!, objectId.parse(req.params.id), req.principal!, body.reason),
+  });
+});
+
+adminRoutes.patch('/bookings/:id/reschedule', async (req, res) => {
+  const body = z.object({ newSlotStartTime: z.iso.datetime({ offset: true }) }).parse(req.body);
+  res.json({
+    data: await rescheduleBooking(
+      req.tenant!,
+      objectId.parse(req.params.id),
+      req.principal!,
+      body.newSlotStartTime,
+    ),
   });
 });

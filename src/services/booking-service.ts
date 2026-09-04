@@ -21,6 +21,7 @@ import {
 import { invalidateAvailability, withDistributedLock } from '../redis.js';
 import type { AppTenant, AuthPrincipal } from '../types.js';
 import { getAvailability } from './availability-service.js';
+import { pickStaffForSlot } from './slot-search-service.js';
 
 export type GuestDetails = { name?: string; phone?: string; socialHandle?: string };
 
@@ -185,7 +186,8 @@ function isSameHoldRequest(
 export async function createHold(
   tenant: AppTenant,
   input: {
-    staffId: string;
+    /** Omit to let the scheduler assign whoever is free for the slot. */
+    staffId?: string;
     serviceId: string;
     slotStartTime: string;
     customer: GuestDetails;
@@ -198,14 +200,21 @@ export async function createHold(
     | AppointmentShape
     | null;
   if (existing) {
-    if (!isSameHoldRequest(existing, { staffId: input.staffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
+    // A replay without a stylist matches whoever the first attempt assigned.
+    const expectedStaffId = input.staffId ?? existing.staffId.toString();
+    if (!isSameHoldRequest(existing, { staffId: expectedStaffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
       throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was used for a different hold');
     }
     return view(existing);
   }
 
+  const staffId =
+    input.staffId ??
+    (await pickStaffForSlot(tenant, { serviceId: input.serviceId, date, slotStartMs: start.toMillis() }));
+  if (!staffId) throw new HttpError(409, 'SLOT_UNAVAILABLE', 'That time is not available for this service');
+
   try {
-    const booking = await withDistributedLock(`schedule:${tenant.id}:${input.staffId}:${date}`, () =>
+    const booking = await withDistributedLock(`schedule:${tenant.id}:${staffId}:${date}`, () =>
       withMongoTransaction(async (session) => {
         const repeated = (await AppointmentModel.findOne({
           appId: tenant.id,
@@ -214,23 +223,23 @@ export async function createHold(
           .session(session)
           .lean()) as AppointmentShape | null;
         if (repeated) {
-          if (!isSameHoldRequest(repeated, { staffId: input.staffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
+          if (!isSameHoldRequest(repeated, { staffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
             throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was used for a different hold');
           }
           return repeated;
         }
         const now = new Date();
-        await SlotClaimModel.deleteMany({ appId: tenant.id, staffId: input.staffId, expiresAt: { $lte: now } }).session(
+        await SlotClaimModel.deleteMany({ appId: tenant.id, staffId, expiresAt: { $lte: now } }).session(
           session,
         );
         await AppointmentModel.updateMany(
-          { appId: tenant.id, staffId: input.staffId, status: 'HOLD', holdExpiresAt: { $lte: now } },
+          { appId: tenant.id, staffId, status: 'HOLD', holdExpiresAt: { $lte: now } },
           { $set: { status: 'EXPIRED' } },
           { session },
         );
         const availability = await getAvailability(
           tenant,
-          { staffId: input.staffId, serviceId: input.serviceId, date },
+          { staffId, serviceId: input.serviceId, date },
           session,
         );
         const selected = availability.slots.find((slot) => Date.parse(slot.start) === start.toMillis());
@@ -241,7 +250,7 @@ export async function createHold(
         const appointmentData = {
           _id: appointmentId,
           appId: tenant.id,
-          staffId: input.staffId,
+          staffId,
           serviceId: input.serviceId,
           status: 'HOLD' as const,
           startsAt: new Date(selected.start),
@@ -254,7 +263,7 @@ export async function createHold(
         await AppointmentModel.create([appointmentData], { session });
         await claimRange(session, {
           appId: tenant.id,
-          staffId: input.staffId,
+          staffId,
           sourceId: appointmentId,
           sourceType: 'APPOINTMENT',
           startsAt: appointmentData.startsAt,
@@ -268,10 +277,10 @@ export async function createHold(
           actorType: 'APP',
           newValue: { status: 'HOLD', startsAt: appointmentData.startsAt.toISOString() },
         });
-        return { ...appointmentData, appId: new Types.ObjectId(tenant.id), staffId: new Types.ObjectId(input.staffId), serviceId: new Types.ObjectId(input.serviceId) } as AppointmentShape;
+        return { ...appointmentData, appId: new Types.ObjectId(tenant.id), staffId: new Types.ObjectId(staffId), serviceId: new Types.ObjectId(input.serviceId) } as AppointmentShape;
       }),
     );
-    await invalidateAvailability(tenant.id, input.staffId, date);
+    await invalidateAvailability(tenant.id, staffId, date);
     return view(booking);
   } catch (error) {
     if (isDuplicateKey(error)) {
@@ -280,7 +289,7 @@ export async function createHold(
         idempotencyKey: input.idempotencyKey,
       }).lean()) as AppointmentShape | null;
       if (repeated) {
-        if (!isSameHoldRequest(repeated, { staffId: input.staffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
+        if (!isSameHoldRequest(repeated, { staffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
           throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was used for a different hold');
         }
         return view(repeated);

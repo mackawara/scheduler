@@ -4,13 +4,15 @@ A multi-tenant scheduling service built with TypeScript, Express, MongoDB, Redis
 
 ## What is implemented
 
-- Per-app API keys, data isolation, timezone, hold TTL, reschedule cutoff, and slot interval
+- Per-app secret and publishable API keys, data isolation, timezone, hold TTL, reschedule cutoff, and slot interval
 - Admin JWT authentication with `ADMIN`/`STAFF` roles
 - Dynamic service duration (`baseDurationMinutes + bufferDurationMinutes`)
 - Recurring staff working hours and one-off blocked slots
 - Gap-based availability in the app's IANA timezone; stored timestamps remain UTC
 - Five-minute holds, idempotent hold creation, confirmation, soft cancellation, and atomic rescheduling
 - Guest checkout using a phone number or social handle
+- Optional customer accounts that adopt guest bookings already made against the same phone number
+- "Any available" search that merges availability across every qualified staff member, with automatic assignment at hold time
 - Customer OTP authorization for cancellation and rescheduling
 - Waitlist release events after cancellation
 - Encrypted customer/OTP/webhook-secret payloads using AES-256-GCM
@@ -59,16 +61,31 @@ Run the notification/hold-expiry worker in a second terminal:
 npm run worker
 ```
 
-The seed prints the Beauty Naomi API key once. Save it in the chatbot as `SCHEDULER_API_KEY`; do not commit it. A ready-to-copy TypeScript adapter is in [examples/beauty-naomi-scheduler-client.ts](./examples/beauty-naomi-scheduler-client.ts).
+The seed prints the Beauty Naomi keys once. Save the secret key in the chatbot as `SCHEDULER_API_KEY` and the publishable key in the portal as `VITE_SCHEDULER_PUBLIC_KEY`; do not commit either. A ready-to-copy TypeScript adapter is in [examples/beauty-naomi-scheduler-client.ts](./examples/beauty-naomi-scheduler-client.ts).
+
+## API keys
+
+Every app gets two keys:
+
+| Key | Prefix | Where it belongs |
+| --- | --- | --- |
+| Secret | `sk_sched_` | Servers only — the chatbot, backend jobs. Grants every `/api/*` route. |
+| Publishable | `pk_sched_` | Safe to ship in a browser bundle. Grants the catalog, availability, booking-creation, and customer self-service routes. |
+
+`GET /api/bookings/:id` returns decrypted customer details, so it rejects publishable keys with `SECRET_KEY_REQUIRED`. A browser reads a customer's own bookings through `GET /api/customers/me/bookings` instead, which requires a token the customer proved they own.
+
+Both keys are printed once by the seed and `app:create` scripts. Re-run the seed with `ROTATE_PUBLIC_KEY=true` to back-fill or rotate a publishable key.
 
 ## Booking flow
 
 All `/api/*` application routes require `x-api-key`.
 
 1. `GET /api/services`
-2. `GET /api/staff?serviceId=<id>`
-3. `GET /api/slots/available?staffId=<id>&serviceId=<id>&date=2026-09-01`
-4. `POST /api/bookings/hold` with an `idempotency-key` header
+2. `GET /api/staff?serviceId=<id>` — only when the customer picks a stylist up front
+3. Availability, either:
+   - `GET /api/slots/search?serviceId=<id>&date=2026-09-01` for every qualified stylist at once, each slot listing who is free; add `&staffId=<id>` to narrow it, or
+   - `GET /api/slots/available?staffId=<id>&serviceId=<id>&date=2026-09-01` for one stylist
+4. `POST /api/bookings/hold` with an `idempotency-key` header. Omit `staffId` to let the scheduler assign the least-loaded qualified stylist for that slot.
 5. `POST /api/bookings/confirm`
 
 Example hold:
@@ -90,15 +107,35 @@ Confirm with `{ "holdId": "...", "paymentReference": "..." }`. Payment tokens ar
 
 ## Customer self-service
 
-Request and verify an OTP:
+There are two ways for a customer to prove who they are. Both accept a publishable key, so the portal can run them straight from the browser.
+
+**Per booking**, when they already have a booking reference:
 
 - `POST /api/bookings/:id/otp/request`
 - `POST /api/bookings/:id/otp/verify` with `{ "code": "123456" }`
 
-Verification returns a 15-minute booking-scoped bearer token. Send that token together with the app API key to:
+Verification returns a 15-minute booking-scoped bearer token.
+
+**Per customer**, to find every booking behind a phone number — the same identity a WhatsApp booking uses, so a booking made in either channel is manageable in both:
+
+- `POST /api/customers/otp/request` with `{ "phone": "+263..." }`
+- `POST /api/customers/otp/verify` with `{ "phone": "+263...", "code": "123456" }`
+
+Verification returns a 30-minute customer-scoped token. The request endpoint answers identically for known and unknown numbers, so it cannot be used to enumerate customers; only a number already on file is sent a code.
+
+Customers may also register an account. Registering with a phone number that already has guest bookings adopts that history rather than creating a second record:
+
+- `POST /api/customers/register` with `{ name, email, password, phone }`
+- `POST /api/customers/login` with `{ email, password }`
+- `GET /api/customers/me`
+- `GET /api/customers/me/bookings?includePast=true`
+
+Send either customer token together with the app key to:
 
 - `POST /api/bookings/:id/cancel`
 - `PATCH /api/bookings/:id/reschedule`
+
+A customer-scoped token is checked against the booking's owner, so it can only manage that customer's own bookings.
 
 Set `DEV_EXPOSE_OTP=true` only for local development. In production, OTP values are sent through the configured notification webhook and never returned by the API.
 
@@ -111,7 +148,13 @@ Login with `POST /api/admin/auth/login` and `{ appSlug, email, password }`. Use 
 - `PUT /api/admin/staff/:id/working-hours`
 - `POST /api/admin/block-slot`
 - `DELETE /api/admin/block-slot/:id`
+- `GET /api/admin/services`
+- `GET /api/admin/staff`
 - `GET /api/admin/bookings?from=<ISO>&to=<ISO>`
+- `GET /api/admin/bookings/:id`
+- `GET /api/admin/bookings/:id/reschedule-options?date=<YYYY-MM-DD>`
+- `POST /api/admin/bookings/:id/cancel`
+- `PATCH /api/admin/bookings/:id/reschedule`
 
 Create another isolated app from the command line:
 
@@ -126,7 +169,9 @@ APP_ADMIN_PASSWORD='replace-with-a-strong-password' npm run app:create -- \
 
 ## Notification webhooks
 
-The worker sends JSON events such as `BOOKING_CREATED`, `BOOKING_RESCHEDULED`, `BOOKING_CANCELLED`, `WAITLIST_SPOT_OPEN`, `REMINDER_24H`, `REMINDER_2H`, and `BOOKING_OTP_REQUESTED`.
+The worker sends JSON events such as `BOOKING_CREATED`, `BOOKING_RESCHEDULED`, `BOOKING_CANCELLED`, `WAITLIST_SPOT_OPEN`, `REMINDER_24H`, `REMINDER_2H`, `BOOKING_OTP_REQUESTED`, and `CUSTOMER_OTP_REQUESTED`.
+
+`BOOKING_OTP_REQUESTED` and `CUSTOMER_OTP_REQUESTED` carry the six-digit code in the encrypted portion of the payload; the consumer is responsible for delivering it to the customer.
 
 Requests include:
 

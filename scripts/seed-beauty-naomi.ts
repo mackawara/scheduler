@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createApiKey, encryptJson, hashPassword } from '../src/lib/crypto.js';
+import { createApiKey, createPublicKey, encryptJson, hashPassword } from '../src/lib/crypto.js';
 import { closeDatabase, connectDatabase } from '../src/db.js';
 import {
   AdminUserModel,
@@ -10,6 +10,7 @@ import {
   BlockedSlotModel,
   BookingOtpModel,
   CustomerModel,
+  CustomerOtpModel,
   OutboxModel,
   ServiceModel,
   SlotClaimModel,
@@ -68,19 +69,25 @@ try {
     WaitlistModel,
     OutboxModel,
     BookingOtpModel,
+    CustomerOtpModel,
     AuditLogModel,
   ];
   await Promise.all(models.map((model) => model.createIndexes()));
 
   let app = await AppModel.findOne({ slug: seed.app.slug });
   let visibleApiKey: string | null = null;
+  let visiblePublicKey: string | null = null;
   if (!app) {
     const apiKey = createApiKey();
+    const publicKey = createPublicKey();
     visibleApiKey = apiKey.key;
+    visiblePublicKey = publicKey.key;
     app = await AppModel.create({
       ...seed.app,
       apiKeyPrefix: apiKey.prefix,
       apiKeyHash: apiKey.hash,
+      publicKeyPrefix: publicKey.prefix,
+      publicKeyHash: publicKey.hash,
       webhookUrl: process.env.BEAUTY_NAOMI_WEBHOOK_URL ?? null,
     });
   } else {
@@ -89,6 +96,12 @@ try {
       const apiKey = createApiKey();
       visibleApiKey = apiKey.key;
       app.set({ apiKeyPrefix: apiKey.prefix, apiKeyHash: apiKey.hash });
+    }
+    // Back-fills the publishable key for apps seeded before it existed.
+    if (!app.publicKeyPrefix || process.env.ROTATE_PUBLIC_KEY === 'true') {
+      const publicKey = createPublicKey();
+      visiblePublicKey = publicKey.key;
+      app.set({ publicKeyPrefix: publicKey.prefix, publicKeyHash: publicKey.hash });
     }
     await app.save();
   }
@@ -125,7 +138,16 @@ try {
 
   console.log(`Beauty Naomi app id: ${app._id.toString()}`);
   console.log(`Admin login: ${seed.adminEmail}`);
-  console.log(visibleApiKey ? `API key (save now): ${visibleApiKey}` : 'API key unchanged; set ROTATE_API_KEY=true to rotate it.');
+  console.log(
+    visibleApiKey
+      ? `Secret API key (save now, server-side only): ${visibleApiKey}`
+      : 'Secret API key unchanged; set ROTATE_API_KEY=true to rotate it.',
+  );
+  console.log(
+    visiblePublicKey
+      ? `Publishable key (safe for browser bundles): ${visiblePublicKey}`
+      : 'Publishable key unchanged; set ROTATE_PUBLIC_KEY=true to rotate it.',
+  );
   if (visibleWebhookSecret) console.log(`Webhook signing secret (save now): ${visibleWebhookSecret}`);
 } finally {
   await closeDatabase();

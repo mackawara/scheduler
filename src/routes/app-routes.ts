@@ -4,7 +4,7 @@ import { env } from '../config.js';
 import { withMongoTransaction } from '../db.js';
 import { encryptJson } from '../lib/crypto.js';
 import { HttpError, notFound } from '../lib/errors.js';
-import { apiKeyAuth, bookingManagementAuth } from '../middleware/auth.js';
+import { apiKeyAuth, bookingManagementAuth, customerAuth, customerIdOf, requireSecretKey } from '../middleware/auth.js';
 import { AuditLogModel, ServiceModel, StaffModel, WaitlistModel } from '../models.js';
 import { getAvailability } from '../services/availability-service.js';
 import {
@@ -16,9 +16,20 @@ import {
   rescheduleBooking,
   verifyBookingOtp,
 } from '../services/booking-service.js';
+import {
+  assertBookingOwnedByCustomer,
+  getCustomerProfile,
+  listCustomerBookings,
+  loginCustomer,
+  registerCustomer,
+  requestCustomerOtp,
+  verifyCustomerOtp,
+} from '../services/customer-service.js';
+import { searchSlots } from '../services/slot-search-service.js';
 
 const uuid = z.string().regex(/^[a-f\d]{24}$/i, 'Must be a MongoDB ObjectId');
 const isoTimestamp = z.iso.datetime({ offset: true });
+const phone = z.string().trim().min(5).max(30);
 const guest = z
   .object({
     name: z.string().trim().min(1).max(120).optional(),
@@ -71,9 +82,18 @@ appRoutes.get('/slots/available', async (req, res) => {
   res.json({ data: await getAvailability(req.tenant!, query) });
 });
 
+/**
+ * Availability across every staff member who can perform the service. Pass
+ * staffId to narrow it to one stylist; omit it to browse "any available".
+ */
+appRoutes.get('/slots/search', async (req, res) => {
+  const query = z.object({ serviceId: uuid, date: z.iso.date(), staffId: uuid.optional() }).parse(req.query);
+  res.json({ data: await searchSlots(req.tenant!, query) });
+});
+
 appRoutes.post('/bookings/hold', async (req, res) => {
   const body = z
-    .object({ staffId: uuid, serviceId: uuid, slotStartTime: isoTimestamp, customer: guest })
+    .object({ staffId: uuid.optional(), serviceId: uuid, slotStartTime: isoTimestamp, customer: guest })
     .parse(req.body);
   const idempotencyKey = z.string().trim().min(8).max(200).parse(req.get('idempotency-key'));
   res.status(201).json({ data: await createHold(req.tenant!, { ...body, idempotencyKey }) });
@@ -92,7 +112,8 @@ appRoutes.post('/bookings/confirm', async (req, res) => {
   });
 });
 
-appRoutes.get('/bookings/:id', async (req, res) => {
+// Returns decrypted customer details, so a publishable key is never enough.
+appRoutes.get('/bookings/:id', requireSecretKey, async (req, res) => {
   res.json({ data: await getBooking(req.tenant!, uuid.parse(req.params.id)) });
 });
 
@@ -106,22 +127,72 @@ appRoutes.post('/bookings/:id/otp/verify', async (req, res) => {
   res.json({ data: await verifyBookingOtp(req.tenant!, bookingId, body.code) });
 });
 
+/** A customer-wide token may only touch bookings that belong to that customer. */
+async function assertPrincipalOwnsBooking(req: Parameters<typeof bookingManagementAuth>[0], bookingId: string) {
+  const principal = req.principal!;
+  if (principal.type === 'CUSTOMER' && principal.customerId) {
+    await assertBookingOwnedByCustomer(req.tenant!, bookingId, principal.customerId);
+  }
+}
+
 appRoutes.post('/bookings/:id/cancel', bookingManagementAuth, async (req, res) => {
+  const bookingId = uuid.parse(req.params.id);
   const body = z.object({ reason: z.string().trim().max(300).optional() }).parse(req.body);
-  res.json({
-    data: await cancelBooking(req.tenant!, uuid.parse(req.params.id), req.principal!, body.reason),
-  });
+  await assertPrincipalOwnsBooking(req, bookingId);
+  res.json({ data: await cancelBooking(req.tenant!, bookingId, req.principal!, body.reason) });
 });
 
 appRoutes.patch('/bookings/:id/reschedule', bookingManagementAuth, async (req, res) => {
+  const bookingId = uuid.parse(req.params.id);
   const body = z.object({ newSlotStartTime: isoTimestamp }).parse(req.body);
+  await assertPrincipalOwnsBooking(req, bookingId);
   res.json({
-    data: await rescheduleBooking(
-      req.tenant!,
-      uuid.parse(req.params.id),
-      req.principal!,
-      body.newSlotStartTime,
-    ),
+    data: await rescheduleBooking(req.tenant!, bookingId, req.principal!, body.newSlotStartTime),
+  });
+});
+
+/**
+ * Customer self-service. A customer proves who they are either with a code sent
+ * to their phone — the same identity WhatsApp bookings use — or with an account
+ * password. Both mint the same customer-scoped token.
+ */
+appRoutes.post('/customers/otp/request', async (req, res) => {
+  const body = z.object({ phone }).parse(req.body);
+  res.status(202).json({ data: await requestCustomerOtp(req.tenant!, body.phone) });
+});
+
+appRoutes.post('/customers/otp/verify', async (req, res) => {
+  const body = z.object({ phone, code: z.string().regex(/^\d{6}$/) }).parse(req.body);
+  res.json({ data: await verifyCustomerOtp(req.tenant!, body.phone, body.code) });
+});
+
+appRoutes.post('/customers/register', async (req, res) => {
+  const body = z
+    .object({
+      name: z.string().trim().min(1).max(120),
+      email: z.email(),
+      password: z.string().min(8).max(200),
+      phone,
+    })
+    .parse(req.body);
+  res.status(201).json({ data: await registerCustomer(req.tenant!, body) });
+});
+
+appRoutes.post('/customers/login', async (req, res) => {
+  const body = z.object({ email: z.email(), password: z.string().min(1).max(200) }).parse(req.body);
+  res.json({ data: await loginCustomer(req.tenant!, body) });
+});
+
+appRoutes.get('/customers/me', customerAuth, async (req, res) => {
+  res.json({ data: await getCustomerProfile(req.tenant!, customerIdOf(req)) });
+});
+
+appRoutes.get('/customers/me/bookings', customerAuth, async (req, res) => {
+  const query = z.object({ includePast: z.enum(['true', 'false']).optional() }).parse(req.query);
+  res.json({
+    data: await listCustomerBookings(req.tenant!, customerIdOf(req), {
+      includePast: query.includePast === 'true',
+    }),
   });
 });
 

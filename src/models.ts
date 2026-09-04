@@ -28,6 +28,8 @@ const appSchema = new Schema(
     slotIntervalMinutes: { type: Number, required: true, default: 15, min: 5, max: 120 },
     apiKeyPrefix: { type: String, required: true, unique: true },
     apiKeyHash: { type: String, required: true },
+    publicKeyPrefix: { type: String, default: null, unique: true, sparse: true },
+    publicKeyHash: { type: String, default: null },
     webhookUrl: { type: String, default: null },
     webhookSecretEncrypted: { type: String, default: null },
     active: { type: Boolean, default: true },
@@ -102,10 +104,17 @@ const customerSchema = new Schema(
     appId: { type: objectId, ref: 'App', required: true, index: true },
     dataEncrypted: { type: String, required: true },
     phoneLookupHash: { type: String, default: null },
+    emailLookupHash: { type: String, default: null },
+    passwordHash: { type: String, default: null },
+    accountCreatedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
 customerSchema.index({ appId: 1, phoneLookupHash: 1 });
+customerSchema.index(
+  { appId: 1, emailLookupHash: 1 },
+  { unique: true, partialFilterExpression: { emailLookupHash: { $type: 'string' } } },
+);
 
 const appointmentSchema = new Schema(
   {
@@ -194,6 +203,20 @@ const bookingOtpSchema = new Schema(
 bookingOtpSchema.index({ appointmentId: 1, expiresAt: -1 });
 bookingOtpSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 24 * 60 * 60 });
 
+const customerOtpSchema = new Schema(
+  {
+    appId: { type: objectId, ref: 'App', required: true },
+    phoneLookupHash: { type: String, required: true },
+    codeHash: { type: String, required: true },
+    expiresAt: { type: Date, required: true },
+    consumedAt: { type: Date, default: null },
+    attempts: { type: Number, default: 0 },
+  },
+  { timestamps: true },
+);
+customerOtpSchema.index({ appId: 1, phoneLookupHash: 1, expiresAt: -1 });
+customerOtpSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 24 * 60 * 60 });
+
 const auditLogSchema = new Schema(
   {
     appId: { type: objectId, ref: 'App', required: true, index: true },
@@ -220,6 +243,7 @@ export const SlotClaimModel = model('SlotClaim', slotClaimSchema);
 export const WaitlistModel = model('Waitlist', waitlistSchema);
 export const OutboxModel = model('Outbox', outboxSchema);
 export const BookingOtpModel = model('BookingOtp', bookingOtpSchema);
+export const CustomerOtpModel = model('CustomerOtp', customerOtpSchema);
 export const AuditLogModel = model('AuditLog', auditLogSchema);
 
 export { Types };

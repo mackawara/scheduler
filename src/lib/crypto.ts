@@ -62,6 +62,23 @@ export function parseApiKeyPrefix(key: string): string | null {
   return match?.[1] ?? null;
 }
 
+/**
+ * Publishable keys are safe to ship in a browser bundle. They authenticate the
+ * tenant for catalog, availability, and booking-creation routes only; anything
+ * that reads stored personal data still requires the secret key or a token the
+ * customer proved they own.
+ */
+export function createPublicKey(): { key: string; prefix: string; hash: string } {
+  const prefix = randomBytes(6).toString('hex');
+  const key = `pk_sched_${prefix}_${randomBytes(24).toString('base64url')}`;
+  return { key, prefix, hash: sha256(key) };
+}
+
+export function parsePublicKeyPrefix(key: string): string | null {
+  const match = /^pk_sched_([a-f0-9]{12})_[A-Za-z0-9_-]{32}$/.exec(key);
+  return match?.[1] ?? null;
+}
+
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
   const derived = (await scrypt(password, salt, 64)) as Buffer;
