@@ -12,8 +12,26 @@
   "services": [
     {
       "name": "Hair Wash",
-      "description": "Starter catalog entry; replace with the salon's confirmed catalog.",
+      "description": "Hair Wash.",
       "baseDurationMinutes": 60,
+      "bufferDurationMinutes": 15,
+      "resourceType": "Stylist",
+      "priceCents": 0,
+      "currency": "USD"
+    },
+    {
+      "name": "Manicure",
+      "description": "Manicure.",
+      "baseDurationMinutes": 120,
+      "bufferDurationMinutes": 15,
+      "resourceType": "Stylist",
+      "priceCents": 0,
+      "currency": "USD"
+    },
+    {
+      "name": "Pedicure",
+      "description": "Pedicure.",
+      "baseDurationMinutes": 100,
       "bufferDurationMinutes": 15,
       "resourceType": "Stylist",
       "priceCents": 0,
