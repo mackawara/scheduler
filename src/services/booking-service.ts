@@ -17,7 +17,7 @@ import {
   StaffModel,
   Types,
   WaitlistModel,
-} from '../models.js';
+} from '../models/index.js';
 import { invalidateAvailability, withDistributedLock } from '../redis.js';
 import type { AppTenant, AuthPrincipal } from '../types.js';
 import { getAvailability } from './availability-service.js';

@@ -2,7 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { parseApiKeyPrefix, safeEqualHex, sha256 } from '../lib/crypto.js';
 import { HttpError } from '../lib/errors.js';
 import { verifyToken } from '../lib/jwt.js';
-import { AppModel } from '../models.js';
+import { AppModel } from '../models/index.js';
 import type { AppTenant } from '../types.js';
 
 type AppDocument = {

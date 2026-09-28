@@ -1,6 +1,6 @@
 import { createApiKey, encryptJson, hashPassword } from '../src/lib/crypto.js';
 import { closeDatabase, connectDatabase } from '../src/db.js';
-import { AdminUserModel, AppModel } from '../src/models.js';
+import { AdminUserModel, AppModel } from '../src/models/index.js';
 import { env } from '../src/config.js';
 
 function argument(name: string): string | undefined {

@@ -16,7 +16,7 @@ import {
   SlotClaimModel,
   StaffModel,
   Types,
-} from '../models.js';
+} from '../models/index.js';
 import { invalidateAvailability, withDistributedLock } from '../redis.js';
 import { claimRange } from '../services/booking-service.js';
 
