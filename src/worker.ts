@@ -4,7 +4,7 @@ import { env } from './config.js';
 import { closeDatabase, connectDatabase, withMongoTransaction } from './db.js';
 import { decryptJson } from './lib/crypto.js';
 import { logger } from './lib/logger.js';
-import { AppModel, AppointmentModel, AuditLogModel, OutboxModel, SlotClaimModel } from './models.js';
+import { AppModel, AppointmentModel, AuditLogModel, OutboxModel, SlotClaimModel } from './models/index.js';
 import { closeRedis, connectRedis, invalidateAvailability } from './redis.js';
 
 let running = true;

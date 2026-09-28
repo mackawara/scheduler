@@ -2,7 +2,7 @@ import { DateTime } from 'luxon';
 import type { ClientSession } from 'mongoose';
 import { buildAvailableSlots, type TimeRange } from '../domain/availability.js';
 import { HttpError, notFound } from '../lib/errors.js';
-import { AppointmentModel, BlockedSlotModel, ServiceModel, StaffModel } from '../models.js';
+import { AppointmentModel, BlockedSlotModel, ServiceModel, StaffModel } from '../models/index.js';
 import { availabilityVersion, redis } from '../redis.js';
 import type { AppTenant } from '../types.js';
 

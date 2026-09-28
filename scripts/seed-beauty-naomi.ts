@@ -15,7 +15,7 @@ import {
   SlotClaimModel,
   StaffModel,
   WaitlistModel,
-} from '../src/models.js';
+} from '../src/models/index.js';
 import { env } from '../src/config.js';
 
 type Seed = {

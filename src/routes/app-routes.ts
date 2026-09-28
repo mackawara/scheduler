@@ -5,7 +5,7 @@ import { withMongoTransaction } from '../db.js';
 import { encryptJson } from '../lib/crypto.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { apiKeyAuth, bookingManagementAuth } from '../middleware/auth.js';
-import { AuditLogModel, ServiceModel, StaffModel, WaitlistModel } from '../models.js';
+import { AuditLogModel, ServiceModel, StaffModel, WaitlistModel } from '../models/index.js';
 import { getAvailability } from '../services/availability-service.js';
 import {
   cancelBooking,
