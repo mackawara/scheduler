@@ -71,6 +71,12 @@ All `/api/*` application routes require `x-api-key`.
 4. `POST /api/bookings/hold` with an `idempotency-key` header
 5. `POST /api/bookings/confirm`
 
+### Upcoming dates with availability
+
+`GET /api/availability/dates?serviceId=<id>[&from=YYYY-MM-DD][&days=14][&staffId=<id>][&includeEmpty=true]`
+
+Returns `{ timezone, from, days, service, dates: [{ date, availableSlots }] }` for consecutive local dates in the app timezone (`from` defaults to today, `days` defaults to 14, maximum 31). Only dates with at least one open slot are returned unless `includeEmpty=true`. Each day reuses the cached day availability, so blocks, holds and bookings invalidate it.
+
 ### Any available staff
 
 `staffId` is optional on both `GET /api/slots/available` and `POST /api/bookings/hold`.

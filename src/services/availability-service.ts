@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 import type { ClientSession } from 'mongoose';
 import { buildAvailableSlots, mergeStaffSlots, type TimeRange } from '../domain/availability.js';
+import { localDateRange, localToday } from '../domain/dates.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { AppointmentModel, BlockedSlotModel, ServiceModel, StaffModel } from '../models.js';
 import { availabilityVersion, redis } from '../redis.js';
@@ -220,5 +221,47 @@ export async function getAnyStaffAvailability(
       bufferDurationMinutes: service.bufferDurationMinutes,
     },
     slots: mergeStaffSlots(perStaff.map((result) => ({ staffId: result.staff.id, slots: result.slots }))),
+  };
+}
+
+export type DateSummary = {
+  timezone: string;
+  from: string;
+  days: number;
+  service: { id: string; name: string };
+  dates: Array<{ date: string; availableSlots: number }>;
+};
+
+/**
+ * Open-slot counts for a run of consecutive local dates. Each day/staff pair goes
+ * through getAvailability, so it shares that function's versioned Redis cache.
+ */
+export async function getAvailableDates(
+  tenant: AppTenant,
+  input: { serviceId: string; staffId?: string; from?: string; days: number; includeEmpty?: boolean },
+): Promise<DateSummary> {
+  const today = localToday(tenant.timezone);
+  const from = input.from ?? today;
+  parseLocalDate(from, tenant.timezone);
+  const { service, staff } = await compatibleStaff(tenant, input.serviceId);
+  const staffIds = input.staffId ? [input.staffId] : staff.map((member) => member._id.toString());
+
+  const dates = await Promise.all(
+    localDateRange(from, input.days, tenant.timezone).map(async (date) => {
+      if (date < today) return { date, availableSlots: 0 };
+      const perStaff = await Promise.all(
+        staffIds.map((staffId) => getAvailability(tenant, { staffId, serviceId: input.serviceId, date })),
+      );
+      const merged = mergeStaffSlots(perStaff.map((result) => ({ staffId: result.staff.id, slots: result.slots })));
+      return { date, availableSlots: merged.length };
+    }),
+  );
+
+  return {
+    timezone: tenant.timezone,
+    from,
+    days: input.days,
+    service: { id: service._id.toString(), name: service.name },
+    dates: input.includeEmpty ? dates : dates.filter((entry) => entry.availableSlots > 0),
   };
 }

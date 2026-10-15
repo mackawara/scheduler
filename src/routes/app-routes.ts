@@ -7,7 +7,7 @@ import { HttpError, notFound } from '../lib/errors.js';
 import { apiKeyAuth, bookingManagementAuth } from '../middleware/auth.js';
 import { serviceView } from '../lib/views.js';
 import { AuditLogModel, ServiceModel, StaffModel, WaitlistModel } from '../models.js';
-import { getAnyStaffAvailability, getAvailability } from '../services/availability-service.js';
+import { getAnyStaffAvailability, getAvailability, getAvailableDates } from '../services/availability-service.js';
 import {
   cancelBooking,
   confirmHold,
@@ -69,6 +69,22 @@ appRoutes.get('/slots/available', async (req, res) => {
     ? await getAvailability(req.tenant!, { ...query, staffId: query.staffId })
     : await getAnyStaffAvailability(req.tenant!, query);
   res.json({ data });
+});
+
+appRoutes.get('/availability/dates', async (req, res) => {
+  const query = z
+    .object({
+      serviceId: uuid,
+      staffId: uuid.optional(),
+      from: z.iso.date().optional(),
+      days: z.coerce.number().int().min(1).max(31).default(14),
+      includeEmpty: z
+        .enum(['true', 'false'])
+        .default('false')
+        .transform((value) => value === 'true'),
+    })
+    .parse(req.query);
+  res.json({ data: await getAvailableDates(req.tenant!, query) });
 });
 
 appRoutes.post('/bookings/hold', async (req, res) => {
