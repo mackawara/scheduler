@@ -526,6 +526,7 @@ export async function rescheduleBooking(
   bookingId: string,
   principal: AuthPrincipal,
   newSlotStartTime: string,
+  options: { bypassCutoff?: boolean } = {},
 ): Promise<BookingView> {
   const newStart = parseStart(newSlotStartTime);
   const newDate = newStart.setZone(tenant.timezone).toISODate()!;
@@ -543,7 +544,10 @@ export async function rescheduleBooking(
         if (booking.status !== 'BOOKED') {
           throw new HttpError(409, 'BOOKING_NOT_ACTIVE', 'Only a booked appointment can be rescheduled');
         }
-        if (new Date(booking.startsAt).getTime() - Date.now() < tenant.rescheduleCutoffHours * 60 * 60_000) {
+        if (
+          !options.bypassCutoff &&
+          new Date(booking.startsAt).getTime() - Date.now() < tenant.rescheduleCutoffHours * 60 * 60_000
+        ) {
           throw new HttpError(
             409,
             'RESCHEDULE_WINDOW_CLOSED',

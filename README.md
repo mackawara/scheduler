@@ -126,7 +126,11 @@ Login with `POST /api/admin/auth/login` and `{ appSlug, email, password }`. Use 
 - `GET /api/admin/block-slot?from=<ISO>&to=<ISO>[&staffId=<id>]`
 - `POST /api/admin/block-slot`
 - `DELETE /api/admin/block-slot/:id`
-- `GET /api/admin/bookings?from=<ISO>&to=<ISO>`
+- `GET /api/admin/bookings?from=<ISO>&to=<ISO>[&status=][&staffId=][&limit=50][&offset=0]` (includes the decrypted `customer` name/phone and `meta.total`)
+- `POST /api/admin/bookings/:id/cancel` with `{ "reason"?: "..." }`
+- `PATCH /api/admin/bookings/:id/reschedule` with `{ "newSlotStartTime": "<ISO with offset>" }` (admins may reschedule inside the customer reschedule cutoff)
+
+The admin booking actions need only the admin bearer token (no app API key), so the admin portal never holds the API key. They emit the same `BOOKING_CANCELLED` / `BOOKING_RESCHEDULED` webhook events as customer actions, so the chatbot can notify the customer.
 
 ### Opening and blocking slots
 

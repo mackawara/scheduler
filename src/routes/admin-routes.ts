@@ -2,7 +2,7 @@ import { Router, type RequestHandler } from 'express';
 import { DateTime } from 'luxon';
 import { z } from 'zod';
 import { withMongoTransaction } from '../db.js';
-import { verifyPassword } from '../lib/crypto.js';
+import { decryptJson, verifyPassword } from '../lib/crypto.js';
 import { HttpError, notFound, serviceConflict } from '../lib/errors.js';
 import { signToken } from '../lib/jwt.js';
 import { adminServiceView, adminStaffView } from '../lib/views.js';
@@ -13,13 +13,20 @@ import {
   AppModel,
   AuditLogModel,
   BlockedSlotModel,
+  CustomerModel,
   ServiceModel,
   SlotClaimModel,
   StaffModel,
   Types,
 } from '../models.js';
 import { invalidateAvailability, withDistributedLock } from '../redis.js';
-import { claimRange } from '../services/booking-service.js';
+import {
+  cancelBooking,
+  claimRange,
+  rescheduleBooking,
+  type GuestDetails,
+} from '../services/booking-service.js';
+import { env } from '../config.js';
 import { getAvailability, parseLocalDate, workingWindows } from '../services/availability-service.js';
 import { buildScheduleGrid } from '../domain/schedule.js';
 
@@ -533,33 +540,75 @@ adminRoutes.get('/bookings', async (req, res) => {
       from: z.iso.datetime({ offset: true }),
       to: z.iso.datetime({ offset: true }),
       status: z.enum(['HOLD', 'BOOKED', 'CANCELLED', 'EXPIRED']).optional(),
+      staffId: objectId.optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+      offset: z.coerce.number().int().min(0).default(0),
     })
     .refine((value) => Date.parse(value.from) < Date.parse(value.to), { message: 'from must be before to' })
     .parse(req.query);
-  const bookings = await AppointmentModel.find({
+  const filter = {
     appId: req.tenant!.id,
     startsAt: { $gte: new Date(query.from), $lt: new Date(query.to) },
     ...(query.status ? { status: query.status } : {}),
-  })
-    .sort({ startsAt: 1 })
-    .populate('serviceId', 'name')
-    .populate('staffId', 'name')
-    .lean();
+    ...(query.staffId ? { staffId: query.staffId } : {}),
+  };
+  const [bookings, total] = await Promise.all([
+    AppointmentModel.find(filter)
+      .sort({ startsAt: 1 })
+      .skip(query.offset)
+      .limit(query.limit)
+      .populate('serviceId', 'name')
+      .populate('staffId', 'name')
+      .lean(),
+    AppointmentModel.countDocuments(filter),
+  ]);
+  const customerIds = bookings.flatMap((booking) => (booking.customerId ? [booking.customerId] : []));
+  const customers = await CustomerModel.find({ _id: { $in: customerIds }, appId: req.tenant!.id }).lean();
+  const customerById = new Map(customers.map((customer) => [customer._id.toString(), customer.dataEncrypted]));
+  const customerFor = (booking: (typeof bookings)[number]) => {
+    const encrypted =
+      (booking.customerId ? customerById.get(booking.customerId.toString()) : null) ?? booking.customerDataEncrypted;
+    if (!encrypted) return null;
+    const details = decryptJson<GuestDetails>(encrypted, env.encryptionKey);
+    return { name: details.name ?? null, phone: details.phone ?? null, socialHandle: details.socialHandle ?? null };
+  };
   res.json({
     data: bookings.map((booking) => ({
       id: booking._id.toString(),
       status: booking.status,
       startsAt: booking.startsAt.toISOString(),
+      serviceEndsAt: booking.serviceEndsAt.toISOString(),
       endsAt: booking.endsAt.toISOString(),
       serviceName:
         typeof booking.serviceId === 'object' && booking.serviceId && 'name' in booking.serviceId
           ? booking.serviceId.name
           : null,
+      staffId:
+        typeof booking.staffId === 'object' && booking.staffId && '_id' in booking.staffId
+          ? booking.staffId._id.toString()
+          : String(booking.staffId),
       staffName:
         typeof booking.staffId === 'object' && booking.staffId && 'name' in booking.staffId
           ? booking.staffId.name
           : null,
+      customer: customerFor(booking),
+      cancellationReason: booking.cancellationReason ?? null,
       localStart: DateTime.fromJSDate(booking.startsAt).setZone(req.tenant!.timezone).toISO(),
     })),
+    meta: { total, limit: query.limit, offset: query.offset },
+  });
+});
+
+adminRoutes.post('/bookings/:id/cancel', async (req, res) => {
+  const bookingId = objectId.parse(req.params.id);
+  const body = z.object({ reason: z.string().trim().max(300).optional() }).parse(req.body ?? {});
+  res.json({ data: await cancelBooking(req.tenant!, bookingId, req.principal!, body.reason) });
+});
+
+adminRoutes.patch('/bookings/:id/reschedule', async (req, res) => {
+  const bookingId = objectId.parse(req.params.id);
+  const body = z.object({ newSlotStartTime: z.iso.datetime({ offset: true }) }).parse(req.body);
+  res.json({
+    data: await rescheduleBooking(req.tenant!, bookingId, req.principal!, body.newSlotStartTime, { bypassCutoff: true }),
   });
 });
