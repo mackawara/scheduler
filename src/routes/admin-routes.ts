@@ -579,6 +579,10 @@ adminRoutes.get('/bookings', async (req, res) => {
       startsAt: booking.startsAt.toISOString(),
       serviceEndsAt: booking.serviceEndsAt.toISOString(),
       endsAt: booking.endsAt.toISOString(),
+      serviceId:
+        typeof booking.serviceId === 'object' && booking.serviceId && '_id' in booking.serviceId
+          ? booking.serviceId._id.toString()
+          : String(booking.serviceId),
       serviceName:
         typeof booking.serviceId === 'object' && booking.serviceId && 'name' in booking.serviceId
           ? booking.serviceId.name
