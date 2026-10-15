@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon';
 import type { ClientSession } from 'mongoose';
-import { buildAvailableSlots, type TimeRange } from '../domain/availability.js';
+import { buildAvailableSlots, mergeStaffSlots, type TimeRange } from '../domain/availability.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { AppointmentModel, BlockedSlotModel, ServiceModel, StaffModel } from '../models.js';
 import { availabilityVersion, redis } from '../redis.js';
@@ -47,6 +47,14 @@ function localTime(date: string, time: string, zone: string): DateTime {
   return value;
 }
 
+export function parseLocalDate(date: string, timezone: string): DateTime {
+  const day = DateTime.fromISO(date, { zone: timezone });
+  if (!day.isValid || day.toISODate() !== date) {
+    throw new HttpError(400, 'INVALID_DATE', 'date must be a valid YYYY-MM-DD value');
+  }
+  return day;
+}
+
 export async function getAvailability(
   tenant: AppTenant,
   input: {
@@ -58,10 +66,7 @@ export async function getAvailability(
   },
   session?: ClientSession,
 ): Promise<AvailabilityResult> {
-  const day = DateTime.fromISO(input.date, { zone: tenant.timezone });
-  if (!day.isValid || day.toISODate() !== input.date) {
-    throw new HttpError(400, 'INVALID_DATE', 'date must be a valid YYYY-MM-DD value');
-  }
+  const day = parseLocalDate(input.date, tenant.timezone);
 
   let cacheKey: string | null = null;
   if (!session && !input.excludeAppointmentId && !input.includePast && redis?.status === 'ready') {
@@ -170,4 +175,50 @@ export async function getAvailability(
     }
   }
   return result;
+}
+
+export type AnyStaffAvailabilityResult = Omit<AvailabilityResult, 'staff' | 'slots'> & {
+  staff: Array<{ id: string; name: string }>;
+  slots: Array<AvailableSlot & { staffIds: string[] }>;
+};
+
+/** Staff who can perform a service, in a stable order (by name). */
+export async function compatibleStaff(
+  tenant: AppTenant,
+  serviceId: string,
+): Promise<{ service: ServiceDocument; staff: StaffDocument[] }> {
+  const service = (await ServiceModel.findOne({ _id: serviceId, appId: tenant.id, active: true }).lean()) as
+    | ServiceDocument
+    | null;
+  if (!service) throw notFound('Service');
+  const staff = (await StaffModel.find({ appId: tenant.id, active: true, resourceType: service.resourceType })
+    .sort({ name: 1 })
+    .lean()) as StaffDocument[];
+  return { service, staff };
+}
+
+/** Availability for a service across every compatible staff member ("any available staff"). */
+export async function getAnyStaffAvailability(
+  tenant: AppTenant,
+  input: { serviceId: string; date: string },
+): Promise<AnyStaffAvailabilityResult> {
+  parseLocalDate(input.date, tenant.timezone);
+  const { service, staff } = await compatibleStaff(tenant, input.serviceId);
+  const perStaff = await Promise.all(
+    staff.map((member) =>
+      getAvailability(tenant, { staffId: member._id.toString(), serviceId: input.serviceId, date: input.date }),
+    ),
+  );
+  return {
+    date: input.date,
+    timezone: tenant.timezone,
+    staff: staff.map((member) => ({ id: member._id.toString(), name: member.name })),
+    service: {
+      id: service._id.toString(),
+      name: service.name,
+      baseDurationMinutes: service.baseDurationMinutes,
+      bufferDurationMinutes: service.bufferDurationMinutes,
+    },
+    slots: mergeStaffSlots(perStaff.map((result) => ({ staffId: result.staff.id, slots: result.slots }))),
+  };
 }

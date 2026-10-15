@@ -66,10 +66,17 @@ The seed prints the Beauty Naomi API key once. Save it in the chatbot as `SCHEDU
 All `/api/*` application routes require `x-api-key`.
 
 1. `GET /api/services` (optionally `?catalogRetailerId=<WhatsApp product retailer id>` to resolve a catalog order to a service)
-2. `GET /api/staff?serviceId=<id>`
-3. `GET /api/slots/available?staffId=<id>&serviceId=<id>&date=2026-09-01`
+2. `GET /api/staff?serviceId=<id>` (optional; skip it for "any available staff")
+3. `GET /api/slots/available?serviceId=<id>&date=2026-09-01[&staffId=<id>]`
 4. `POST /api/bookings/hold` with an `idempotency-key` header
 5. `POST /api/bookings/confirm`
+
+### Any available staff
+
+`staffId` is optional on both `GET /api/slots/available` and `POST /api/bookings/hold`.
+
+- Without it, availability is the union of every active staff member whose `resourceType` matches the service, de-duplicated by start time; each slot lists the free staff in `staffIds`.
+- A hold without `staffId` assigns the compatible staff member with the fewest bookings that day who is still free (ties by name), retrying the next candidate if one is taken concurrently. The response contains the assigned `staffId`. Re-sending the same `idempotency-key` returns the original hold.
 
 Example hold:
 

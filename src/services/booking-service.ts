@@ -20,7 +20,7 @@ import {
 } from '../models.js';
 import { invalidateAvailability, withDistributedLock } from '../redis.js';
 import type { AppTenant, AuthPrincipal } from '../types.js';
-import { getAvailability } from './availability-service.js';
+import { compatibleStaff, getAvailability } from './availability-service.js';
 
 export type GuestDetails = { name?: string; phone?: string; socialHandle?: string };
 
@@ -173,32 +173,90 @@ function isDuplicateKey(error: unknown): boolean {
 
 function isSameHoldRequest(
   appointment: AppointmentShape,
-  input: { staffId: string; serviceId: string; startMs: number },
+  input: { staffId?: string; serviceId: string; startMs: number },
 ): boolean {
   return (
-    appointment.staffId.toString() === input.staffId &&
+    (input.staffId === undefined || appointment.staffId.toString() === input.staffId) &&
     appointment.serviceId.toString() === input.serviceId &&
     new Date(appointment.startsAt).getTime() === input.startMs
   );
 }
 
-export async function createHold(
+type HoldInput = {
+  serviceId: string;
+  slotStartTime: string;
+  customer: GuestDetails;
+  idempotencyKey: string;
+};
+
+/**
+ * Hold a slot. With a staffId the hold is for that staff member; without one,
+ * a compatible staff member who is free at that time is assigned automatically.
+ */
+export async function createHold(tenant: AppTenant, input: HoldInput & { staffId?: string }): Promise<BookingView> {
+  if (input.staffId) return createHoldForStaff(tenant, { ...input, staffId: input.staffId });
+  return createAutoAssignedHold(tenant, input);
+}
+
+async function createAutoAssignedHold(tenant: AppTenant, input: HoldInput): Promise<BookingView> {
+  const start = parseStart(input.slotStartTime);
+  const existing = (await AppointmentModel.findOne({ appId: tenant.id, idempotencyKey: input.idempotencyKey }).lean()) as
+    | AppointmentShape
+    | null;
+  if (existing) {
+    if (!isSameHoldRequest(existing, { serviceId: input.serviceId, startMs: start.toMillis() })) {
+      throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was used for a different hold');
+    }
+    return view(existing);
+  }
+
+  const { staff } = await compatibleStaff(tenant, input.serviceId);
+  const day = start.setZone(tenant.timezone).startOf('day');
+  const bookedCounts = await AppointmentModel.aggregate<{ _id: InstanceType<typeof Types.ObjectId>; count: number }>([
+    {
+      $match: {
+        appId: new Types.ObjectId(tenant.id),
+        staffId: { $in: staff.map((member) => new Types.ObjectId(member._id.toString())) },
+        status: 'BOOKED',
+        startsAt: { $gte: day.toJSDate(), $lt: day.plus({ days: 1 }).toJSDate() },
+      },
+    },
+    { $group: { _id: '$staffId', count: { $sum: 1 } } },
+  ]);
+  const load = new Map(bookedCounts.map((row) => [row._id.toString(), row.count]));
+  // Spread work evenly: fewest bookings that day first; ties keep the name order.
+  const candidates = [...staff].sort(
+    (a, b) => (load.get(a._id.toString()) ?? 0) - (load.get(b._id.toString()) ?? 0),
+  );
+
+  for (const member of candidates) {
+    try {
+      return await createHoldForStaff(tenant, { ...input, staffId: member._id.toString() }, { matchStaff: false });
+    } catch (error) {
+      if (error instanceof HttpError && error.code === 'SLOT_UNAVAILABLE') continue;
+      throw error;
+    }
+  }
+  throw new HttpError(409, 'SLOT_UNAVAILABLE', 'That time is not available for this service');
+}
+
+async function createHoldForStaff(
   tenant: AppTenant,
-  input: {
-    staffId: string;
-    serviceId: string;
-    slotStartTime: string;
-    customer: GuestDetails;
-    idempotencyKey: string;
-  },
+  input: HoldInput & { staffId: string },
+  options: { matchStaff: boolean } = { matchStaff: true },
 ): Promise<BookingView> {
   const start = parseStart(input.slotStartTime);
+  const holdRequest = {
+    staffId: options.matchStaff ? input.staffId : undefined,
+    serviceId: input.serviceId,
+    startMs: start.toMillis(),
+  };
   const date = start.setZone(tenant.timezone).toISODate()!;
   const existing = (await AppointmentModel.findOne({ appId: tenant.id, idempotencyKey: input.idempotencyKey }).lean()) as
     | AppointmentShape
     | null;
   if (existing) {
-    if (!isSameHoldRequest(existing, { staffId: input.staffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
+    if (!isSameHoldRequest(existing, holdRequest)) {
       throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was used for a different hold');
     }
     return view(existing);
@@ -214,7 +272,7 @@ export async function createHold(
           .session(session)
           .lean()) as AppointmentShape | null;
         if (repeated) {
-          if (!isSameHoldRequest(repeated, { staffId: input.staffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
+          if (!isSameHoldRequest(repeated, holdRequest)) {
             throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was used for a different hold');
           }
           return repeated;
@@ -280,7 +338,7 @@ export async function createHold(
         idempotencyKey: input.idempotencyKey,
       }).lean()) as AppointmentShape | null;
       if (repeated) {
-        if (!isSameHoldRequest(repeated, { staffId: input.staffId, serviceId: input.serviceId, startMs: start.toMillis() })) {
+        if (!isSameHoldRequest(repeated, holdRequest)) {
           throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was used for a different hold');
         }
         return view(repeated);
