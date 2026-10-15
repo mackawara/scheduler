@@ -37,6 +37,7 @@ type Seed = {
     resourceType: string;
     priceCents: number;
     currency: string;
+    catalogRetailerId?: string | null;
   }>;
   staff: Array<{
     name: string;

@@ -5,6 +5,7 @@ import { withMongoTransaction } from '../db.js';
 import { encryptJson } from '../lib/crypto.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { apiKeyAuth, bookingManagementAuth } from '../middleware/auth.js';
+import { serviceView } from '../lib/views.js';
 import { AuditLogModel, ServiceModel, StaffModel, WaitlistModel } from '../models.js';
 import { getAvailability } from '../services/availability-service.js';
 import {
@@ -33,19 +34,15 @@ export const appRoutes = Router();
 appRoutes.use(apiKeyAuth);
 
 appRoutes.get('/services', async (req, res) => {
-  const services = await ServiceModel.find({ appId: req.tenant!.id, active: true }).sort({ name: 1 }).lean();
-  res.json({
-    data: services.map((service) => ({
-      id: service._id.toString(),
-      name: service.name,
-      description: service.description,
-      baseDurationMinutes: service.baseDurationMinutes,
-      bufferDurationMinutes: service.bufferDurationMinutes,
-      resourceType: service.resourceType,
-      priceCents: service.priceCents,
-      currency: service.currency,
-    })),
-  });
+  const query = z.object({ catalogRetailerId: z.string().trim().min(1).max(200).optional() }).parse(req.query);
+  const services = await ServiceModel.find({
+    appId: req.tenant!.id,
+    active: true,
+    ...(query.catalogRetailerId ? { catalogRetailerId: query.catalogRetailerId } : {}),
+  })
+    .sort({ name: 1 })
+    .lean();
+  res.json({ data: services.map(serviceView) });
 });
 
 appRoutes.get('/staff', async (req, res) => {

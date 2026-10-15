@@ -46,7 +46,7 @@ Start a single-node MongoDB replica set (transactions require it) and Redis:
 docker compose up -d
 ```
 
-Edit [config/beauty-naomi.seed.json](./config/beauty-naomi.seed.json) with the confirmed salon address, catalog, prices, staff, and working hours. The included Hair Wash entry is only a starter based on the supplied specification.
+Edit [config/beauty-naomi.seed.json](./config/beauty-naomi.seed.json) with the confirmed salon address, catalog, prices, staff, and working hours. The included Hair Wash entry is only a starter based on the supplied specification. Set each service's `catalogRetailerId` to the **Content ID / retailer ID** of the matching product in the WhatsApp (Meta Commerce) catalog so the chatbot can map catalog orders to scheduler services.
 
 ```bash
 BEAUTY_NAOMI_ADMIN_PASSWORD='replace-with-a-strong-password' npm run seed:beauty-naomi
@@ -65,7 +65,7 @@ The seed prints the Beauty Naomi API key once. Save it in the chatbot as `SCHEDU
 
 All `/api/*` application routes require `x-api-key`.
 
-1. `GET /api/services`
+1. `GET /api/services` (optionally `?catalogRetailerId=<WhatsApp product retailer id>` to resolve a catalog order to a service)
 2. `GET /api/staff?serviceId=<id>`
 3. `GET /api/slots/available?staffId=<id>&serviceId=<id>&date=2026-09-01`
 4. `POST /api/bookings/hold` with an `idempotency-key` header

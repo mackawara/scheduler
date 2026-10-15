@@ -3,7 +3,7 @@ import { DateTime } from 'luxon';
 import { z } from 'zod';
 import { withMongoTransaction } from '../db.js';
 import { verifyPassword } from '../lib/crypto.js';
-import { HttpError, notFound } from '../lib/errors.js';
+import { HttpError, notFound, serviceConflict } from '../lib/errors.js';
 import { signToken } from '../lib/jwt.js';
 import { adminAuth } from '../middleware/auth.js';
 import {
@@ -71,6 +71,7 @@ adminRoutes.post('/services', async (req, res) => {
       resourceType: z.string().trim().min(1).max(80),
       priceCents: z.number().int().nonnegative().default(0),
       currency: z.string().length(3).transform((value) => value.toUpperCase()).default('USD'),
+      catalogRetailerId: z.string().trim().min(1).max(200).nullable().optional(),
     })
     .parse(req.body);
   const id = await withMongoTransaction(async (session) => {
@@ -91,6 +92,8 @@ adminRoutes.post('/services', async (req, res) => {
       { session },
     );
     return service._id.toString();
+  }).catch((error: unknown) => {
+    throw serviceConflict(error) ?? error;
   });
   res.status(201).json({ data: { id } });
 });
