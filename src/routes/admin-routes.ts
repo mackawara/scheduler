@@ -20,9 +20,27 @@ import {
 } from '../models.js';
 import { invalidateAvailability, withDistributedLock } from '../redis.js';
 import { claimRange } from '../services/booking-service.js';
+import { getAvailability, parseLocalDate, workingWindows } from '../services/availability-service.js';
+import { buildScheduleGrid } from '../domain/schedule.js';
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, 'Must be a MongoDB ObjectId');
 const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+
+function blockView(block: {
+  _id: { toString(): string };
+  staffId: { toString(): string };
+  startsAt: Date;
+  endsAt: Date;
+  reason?: string | null;
+}) {
+  return {
+    id: block._id.toString(),
+    staffId: block.staffId.toString(),
+    startsAt: block.startsAt.toISOString(),
+    endsAt: block.endsAt.toISOString(),
+    reason: block.reason ?? null,
+  };
+}
 
 function localDatesTouched(startsAt: Date, endsAt: Date, timezone: string): string[] {
   const dates: string[] = [];
@@ -311,6 +329,86 @@ adminRoutes.put('/staff/:id/working-hours', requireAdminRole, async (req, res) =
   });
   await invalidateAvailability(req.tenant!.id, staffId);
   res.json({ data: { staffId, hours: body.hours } });
+});
+
+adminRoutes.get('/schedule', async (req, res) => {
+  const query = z.object({ staffId: objectId, date: z.iso.date(), serviceId: objectId.optional() }).parse(req.query);
+  const tenant = req.tenant!;
+  const day = parseLocalDate(query.date, tenant.timezone);
+  const dayStart = day.startOf('day').toJSDate();
+  const dayEnd = day.plus({ days: 1 }).startOf('day').toJSDate();
+  const staff = await StaffModel.findOne({ _id: query.staffId, appId: tenant.id }).lean();
+  if (!staff) throw notFound('Staff member');
+  const range = { appId: tenant.id, staffId: query.staffId, startsAt: { $lt: dayEnd }, endsAt: { $gt: dayStart } };
+  const [appointments, blocks, bookable] = await Promise.all([
+    AppointmentModel.find({ ...range, status: { $in: ['BOOKED', 'HOLD'] } })
+      .populate('serviceId', 'name')
+      .lean(),
+    BlockedSlotModel.find(range).sort({ startsAt: 1 }).lean(),
+    query.serviceId
+      ? getAvailability(tenant, { staffId: query.staffId, serviceId: query.serviceId, date: query.date }).then(
+          (result) => new Set(result.slots.map((slot) => Date.parse(slot.start))),
+        )
+      : Promise.resolve(null),
+  ]);
+  const grid = buildScheduleGrid({
+    windows: workingWindows(staff.workingHours, query.date, tenant.timezone),
+    intervalMinutes: tenant.slotIntervalMinutes,
+    nowMs: Date.now(),
+    blocks: blocks.map((block) => ({
+      id: block._id.toString(),
+      startMs: block.startsAt.getTime(),
+      endMs: block.endsAt.getTime(),
+    })),
+    appointments: appointments.map((appointment) => ({
+      id: appointment._id.toString(),
+      status: appointment.status as 'BOOKED' | 'HOLD',
+      startMs: appointment.startsAt.getTime(),
+      endMs: appointment.endsAt.getTime(),
+      holdExpiresAtMs: appointment.holdExpiresAt?.getTime() ?? null,
+      serviceName:
+        typeof appointment.serviceId === 'object' && appointment.serviceId && 'name' in appointment.serviceId
+          ? String(appointment.serviceId.name)
+          : null,
+    })),
+  });
+  const iso = (ms: number) => DateTime.fromMillis(ms, { zone: 'utc' }).toISO()!;
+  res.json({
+    data: {
+      date: query.date,
+      timezone: tenant.timezone,
+      intervalMinutes: tenant.slotIntervalMinutes,
+      staff: { id: staff._id.toString(), name: staff.name },
+      slots: grid.map((slot) => ({
+        start: iso(slot.startMs),
+        end: iso(slot.endMs),
+        localStart: DateTime.fromMillis(slot.startMs, { zone: tenant.timezone }).toISO(),
+        status: slot.status,
+        past: slot.past,
+        blockId: slot.blockId ?? null,
+        bookingId: slot.bookingId ?? null,
+        serviceName: slot.serviceName ?? null,
+        ...(bookable ? { bookable: bookable.has(slot.startMs) } : {}),
+      })),
+      blocks: blocks.map(blockView),
+    },
+  });
+});
+
+adminRoutes.get('/block-slot', async (req, res) => {
+  const query = z
+    .object({ staffId: objectId.optional(), from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }) })
+    .refine((value) => Date.parse(value.from) < Date.parse(value.to), { message: 'from must be before to' })
+    .parse(req.query);
+  const blocks = await BlockedSlotModel.find({
+    appId: req.tenant!.id,
+    ...(query.staffId ? { staffId: query.staffId } : {}),
+    startsAt: { $lt: new Date(query.to) },
+    endsAt: { $gt: new Date(query.from) },
+  })
+    .sort({ startsAt: 1 })
+    .lean();
+  res.json({ data: blocks.map(blockView) });
 });
 
 adminRoutes.post('/block-slot', async (req, res) => {

@@ -48,6 +48,22 @@ function localTime(date: string, time: string, zone: string): DateTime {
   return value;
 }
 
+/** The staff member's working-hour ranges on a local date, as UTC millisecond ranges. */
+export function workingWindows(
+  workingHours: StaffDocument['workingHours'],
+  date: string,
+  timezone: string,
+): TimeRange[] {
+  const day = parseLocalDate(date, timezone);
+  const dayOfWeek = day.weekday === 7 ? 0 : day.weekday;
+  return workingHours
+    .filter((hours) => hours.dayOfWeek === dayOfWeek)
+    .map((hours) => ({
+      startMs: localTime(date, hours.startsAt, timezone).toMillis(),
+      endMs: localTime(date, hours.endsAt, timezone).toMillis(),
+    }));
+}
+
 export function parseLocalDate(date: string, timezone: string): DateTime {
   const day = DateTime.fromISO(date, { zone: timezone });
   if (!day.isValid || day.toISODate() !== date) {
@@ -98,13 +114,7 @@ export async function getAvailability(
     throw new HttpError(400, 'INCOMPATIBLE_STAFF', 'This staff member cannot perform the selected service');
   }
 
-  const dayOfWeek = day.weekday === 7 ? 0 : day.weekday;
-  const windows = staff.workingHours
-    .filter((hours) => hours.dayOfWeek === dayOfWeek)
-    .map((hours) => ({
-      startMs: localTime(input.date, hours.startsAt, tenant.timezone).toMillis(),
-      endMs: localTime(input.date, hours.endsAt, tenant.timezone).toMillis(),
-    }));
+  const windows = workingWindows(staff.workingHours, input.date, tenant.timezone);
 
   const dayStart = day.startOf('day').toUTC().toJSDate();
   const dayEnd = day.plus({ days: 1 }).startOf('day').toUTC().toJSDate();

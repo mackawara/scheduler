@@ -122,9 +122,19 @@ Login with `POST /api/admin/auth/login` and `{ appSlug, email, password }`. Use 
 - `GET /api/admin/services[?includeInactive=true]`, `POST /api/admin/services`, `PATCH /api/admin/services/:id`
 - `GET /api/admin/staff[?includeInactive=true]`, `GET /api/admin/staff/:id`, `POST /api/admin/staff`, `PATCH /api/admin/staff/:id`
 - `PUT /api/admin/staff/:id/working-hours`
+- `GET /api/admin/schedule?staffId=<id>&date=YYYY-MM-DD[&serviceId=<id>]`
+- `GET /api/admin/block-slot?from=<ISO>&to=<ISO>[&staffId=<id>]`
 - `POST /api/admin/block-slot`
 - `DELETE /api/admin/block-slot/:id`
 - `GET /api/admin/bookings?from=<ISO>&to=<ISO>`
+
+### Opening and blocking slots
+
+Working hours define which slots are open. Customers only ever see open slots, because availability subtracts blocks, live holds and bookings.
+
+- **Block** a slot (or any range) with `POST /api/admin/block-slot`. Blocking a range that overlaps a booking or live hold returns `409 BLOCK_CONFLICTS_WITH_BOOKING`.
+- **Open** a blocked slot again by deleting its block with `DELETE /api/admin/block-slot/:id`.
+- `GET /api/admin/schedule` returns every `slotIntervalMinutes` slot inside the staff member's working hours for that date with `status` `OPEN`, `BLOCKED`, `BOOKED` or `HELD` (precedence in that reverse order: `BOOKED` > `HELD` > `BLOCKED` > `OPEN`), `past`, and the related `blockId` / `bookingId` / `serviceName`. With `serviceId`, each slot also has `bookable`: whether that service can start there. The response also lists the raw `blocks` touching the day, since one block can span several slots.
 
 Service, staff and working-hour changes require the `ADMIN` role; `STAFF` users can read them. Set `active: false` with `PATCH` to retire a service or staff member (there is no hard delete). Duplicate names or catalog retailer IDs return `409`.
 
