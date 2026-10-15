@@ -119,12 +119,14 @@ Set `DEV_EXPOSE_OTP=true` only for local development. In production, OTP values 
 
 Login with `POST /api/admin/auth/login` and `{ appSlug, email, password }`. Use the returned bearer token for:
 
-- `POST /api/admin/services`
-- `POST /api/admin/staff`
+- `GET /api/admin/services[?includeInactive=true]`, `POST /api/admin/services`, `PATCH /api/admin/services/:id`
+- `GET /api/admin/staff[?includeInactive=true]`, `GET /api/admin/staff/:id`, `POST /api/admin/staff`, `PATCH /api/admin/staff/:id`
 - `PUT /api/admin/staff/:id/working-hours`
 - `POST /api/admin/block-slot`
 - `DELETE /api/admin/block-slot/:id`
 - `GET /api/admin/bookings?from=<ISO>&to=<ISO>`
+
+Service, staff and working-hour changes require the `ADMIN` role; `STAFF` users can read them. Set `active: false` with `PATCH` to retire a service or staff member (there is no hard delete). Duplicate names or catalog retailer IDs return `409`.
 
 Create another isolated app from the command line:
 

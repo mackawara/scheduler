@@ -1,10 +1,11 @@
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import { DateTime } from 'luxon';
 import { z } from 'zod';
 import { withMongoTransaction } from '../db.js';
 import { verifyPassword } from '../lib/crypto.js';
 import { HttpError, notFound, serviceConflict } from '../lib/errors.js';
 import { signToken } from '../lib/jwt.js';
+import { adminServiceView, adminStaffView } from '../lib/views.js';
 import { adminAuth } from '../middleware/auth.js';
 import {
   AdminUserModel,
@@ -61,7 +62,81 @@ adminAuthRoutes.post('/login', async (req, res) => {
 export const adminRoutes = Router();
 adminRoutes.use(adminAuth);
 
-adminRoutes.post('/services', async (req, res) => {
+/** Catalog and staff changes are limited to ADMIN users; STAFF users get read-only access. */
+const requireAdminRole: RequestHandler = (req, _res, next) => {
+  if (req.principal?.type === 'ADMIN' && req.principal.role === 'ADMIN') return next();
+  next(new HttpError(403, 'ADMIN_ROLE_REQUIRED', 'Only ADMIN users can make this change'));
+};
+
+const serviceFields = {
+  name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(500),
+  baseDurationMinutes: z.number().int().positive().max(1440),
+  bufferDurationMinutes: z.number().int().nonnegative().max(240),
+  resourceType: z.string().trim().min(1).max(80),
+  priceCents: z.number().int().nonnegative(),
+  currency: z.string().length(3).transform((value) => value.toUpperCase()),
+  catalogRetailerId: z.string().trim().min(1).max(200).nullable(),
+};
+const SLOT_AFFECTING_SERVICE_FIELDS = ['baseDurationMinutes', 'bufferDurationMinutes', 'resourceType', 'active'];
+
+async function invalidateAllStaff(appId: string): Promise<void> {
+  const staff = await StaffModel.find({ appId }).select({ _id: 1 }).lean();
+  await Promise.all(staff.map((member) => invalidateAvailability(appId, member._id.toString())));
+}
+
+adminRoutes.get('/services', async (req, res) => {
+  const query = z.object({ includeInactive: z.enum(['true', 'false']).default('false') }).parse(req.query);
+  const services = await ServiceModel.find({
+    appId: req.tenant!.id,
+    ...(query.includeInactive === 'true' ? {} : { active: true }),
+  })
+    .sort({ name: 1 })
+    .lean();
+  res.json({ data: services.map(adminServiceView) });
+});
+
+adminRoutes.patch('/services/:id', requireAdminRole, async (req, res) => {
+  const serviceId = objectId.parse(req.params.id);
+  const body = z
+    .strictObject({ ...serviceFields, description: serviceFields.description.nullable(), active: z.boolean() })
+    .partial()
+    .refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one field to update' })
+    .parse(req.body);
+  const updated = await withMongoTransaction(async (session) => {
+    const before = await ServiceModel.findOne({ _id: serviceId, appId: req.tenant!.id }).session(session).lean();
+    if (!before) throw notFound('Service');
+    const after = await ServiceModel.findOneAndUpdate(
+      { _id: serviceId, appId: req.tenant!.id },
+      { $set: body },
+      { returnDocument: 'after', session, runValidators: true },
+    ).lean();
+    await AuditLogModel.create(
+      [
+        {
+          appId: req.tenant!.id,
+          aggregateType: 'SERVICE',
+          aggregateId: serviceId,
+          action: 'SERVICE_UPDATED',
+          actorType: 'ADMIN',
+          actorId: req.principal!.id,
+          oldValue: Object.fromEntries(Object.keys(body).map((key) => [key, before[key as keyof typeof before] ?? null])),
+          newValue: body,
+        },
+      ],
+      { session },
+    );
+    return after!;
+  }).catch((error: unknown) => {
+    throw serviceConflict(error) ?? error;
+  });
+  if (Object.keys(body).some((key) => SLOT_AFFECTING_SERVICE_FIELDS.includes(key))) {
+    await invalidateAllStaff(req.tenant!.id);
+  }
+  res.json({ data: adminServiceView(updated) });
+});
+
+adminRoutes.post('/services', requireAdminRole, async (req, res) => {
   const body = z
     .object({
       name: z.string().trim().min(1).max(120),
@@ -98,7 +173,7 @@ adminRoutes.post('/services', async (req, res) => {
   res.status(201).json({ data: { id } });
 });
 
-adminRoutes.post('/staff', async (req, res) => {
+adminRoutes.post('/staff', requireAdminRole, async (req, res) => {
   const body = z
     .object({ name: z.string().trim().min(1).max(120), resourceType: z.string().trim().min(1).max(80) })
     .parse(req.body);
@@ -120,11 +195,73 @@ adminRoutes.post('/staff', async (req, res) => {
       { session },
     );
     return staff._id.toString();
+  }).catch((error: unknown) => {
+    throw serviceConflict(error) ?? error;
   });
   res.status(201).json({ data: { id } });
 });
 
-adminRoutes.put('/staff/:id/working-hours', async (req, res) => {
+adminRoutes.get('/staff', async (req, res) => {
+  const query = z.object({ includeInactive: z.enum(['true', 'false']).default('false') }).parse(req.query);
+  const staff = await StaffModel.find({
+    appId: req.tenant!.id,
+    ...(query.includeInactive === 'true' ? {} : { active: true }),
+  })
+    .sort({ name: 1 })
+    .lean();
+  res.json({ data: staff.map((member) => adminStaffView(member, true)) });
+});
+
+adminRoutes.get('/staff/:id', async (req, res) => {
+  const staffId = objectId.parse(req.params.id);
+  const staff = await StaffModel.findOne({ _id: staffId, appId: req.tenant!.id }).lean();
+  if (!staff) throw notFound('Staff member');
+  res.json({ data: adminStaffView(staff, true) });
+});
+
+adminRoutes.patch('/staff/:id', requireAdminRole, async (req, res) => {
+  const staffId = objectId.parse(req.params.id);
+  const body = z
+    .strictObject({
+      name: z.string().trim().min(1).max(120),
+      resourceType: z.string().trim().min(1).max(80),
+      active: z.boolean(),
+    })
+    .partial()
+    .refine((value) => Object.keys(value).length > 0, { message: 'Provide at least one field to update' })
+    .parse(req.body);
+  const updated = await withMongoTransaction(async (session) => {
+    const before = await StaffModel.findOne({ _id: staffId, appId: req.tenant!.id }).session(session).lean();
+    if (!before) throw notFound('Staff member');
+    const after = await StaffModel.findOneAndUpdate(
+      { _id: staffId, appId: req.tenant!.id },
+      { $set: body },
+      { returnDocument: 'after', session, runValidators: true },
+    ).lean();
+    await AuditLogModel.create(
+      [
+        {
+          appId: req.tenant!.id,
+          aggregateType: 'STAFF',
+          aggregateId: staffId,
+          action: 'STAFF_UPDATED',
+          actorType: 'ADMIN',
+          actorId: req.principal!.id,
+          oldValue: Object.fromEntries(Object.keys(body).map((key) => [key, before[key as keyof typeof before] ?? null])),
+          newValue: body,
+        },
+      ],
+      { session },
+    );
+    return after!;
+  }).catch((error: unknown) => {
+    throw serviceConflict(error) ?? error;
+  });
+  await invalidateAvailability(req.tenant!.id, staffId);
+  res.json({ data: adminStaffView(updated, true) });
+});
+
+adminRoutes.put('/staff/:id/working-hours', requireAdminRole, async (req, res) => {
   const staffId = objectId.parse(req.params.id);
   const body = z
     .object({
