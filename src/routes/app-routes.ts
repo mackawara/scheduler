@@ -5,8 +5,9 @@ import { withMongoTransaction } from '../db.js';
 import { encryptJson } from '../lib/crypto.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { apiKeyAuth, bookingManagementAuth } from '../middleware/auth.js';
+import { serviceView } from '../lib/views.js';
 import { AuditLogModel, ServiceModel, StaffModel, WaitlistModel } from '../models.js';
-import { getAvailability } from '../services/availability-service.js';
+import { getAnyStaffAvailability, getAvailability, getAvailableDates } from '../services/availability-service.js';
 import {
   cancelBooking,
   confirmHold,
@@ -33,19 +34,15 @@ export const appRoutes = Router();
 appRoutes.use(apiKeyAuth);
 
 appRoutes.get('/services', async (req, res) => {
-  const services = await ServiceModel.find({ appId: req.tenant!.id, active: true }).sort({ name: 1 }).lean();
-  res.json({
-    data: services.map((service) => ({
-      id: service._id.toString(),
-      name: service.name,
-      description: service.description,
-      baseDurationMinutes: service.baseDurationMinutes,
-      bufferDurationMinutes: service.bufferDurationMinutes,
-      resourceType: service.resourceType,
-      priceCents: service.priceCents,
-      currency: service.currency,
-    })),
-  });
+  const query = z.object({ catalogRetailerId: z.string().trim().min(1).max(200).optional() }).parse(req.query);
+  const services = await ServiceModel.find({
+    appId: req.tenant!.id,
+    active: true,
+    ...(query.catalogRetailerId ? { catalogRetailerId: query.catalogRetailerId } : {}),
+  })
+    .sort({ name: 1 })
+    .lean();
+  res.json({ data: services.map(serviceView) });
 });
 
 appRoutes.get('/staff', async (req, res) => {
@@ -67,13 +64,32 @@ appRoutes.get('/staff', async (req, res) => {
 });
 
 appRoutes.get('/slots/available', async (req, res) => {
-  const query = z.object({ staffId: uuid, serviceId: uuid, date: z.iso.date() }).parse(req.query);
-  res.json({ data: await getAvailability(req.tenant!, query) });
+  const query = z.object({ staffId: uuid.optional(), serviceId: uuid, date: z.iso.date() }).parse(req.query);
+  const data = query.staffId
+    ? await getAvailability(req.tenant!, { ...query, staffId: query.staffId })
+    : await getAnyStaffAvailability(req.tenant!, query);
+  res.json({ data });
+});
+
+appRoutes.get('/availability/dates', async (req, res) => {
+  const query = z
+    .object({
+      serviceId: uuid,
+      staffId: uuid.optional(),
+      from: z.iso.date().optional(),
+      days: z.coerce.number().int().min(1).max(31).default(14),
+      includeEmpty: z
+        .enum(['true', 'false'])
+        .default('false')
+        .transform((value) => value === 'true'),
+    })
+    .parse(req.query);
+  res.json({ data: await getAvailableDates(req.tenant!, query) });
 });
 
 appRoutes.post('/bookings/hold', async (req, res) => {
   const body = z
-    .object({ staffId: uuid, serviceId: uuid, slotStartTime: isoTimestamp, customer: guest })
+    .object({ staffId: uuid.optional(), serviceId: uuid, slotStartTime: isoTimestamp, customer: guest })
     .parse(req.body);
   const idempotencyKey = z.string().trim().min(8).max(200).parse(req.get('idempotency-key'));
   res.status(201).json({ data: await createHold(req.tenant!, { ...body, idempotencyKey }) });

@@ -57,11 +57,16 @@ const serviceSchema = new Schema(
     resourceType: { type: String, required: true, trim: true },
     priceCents: { type: Number, default: 0, min: 0 },
     currency: { type: String, default: 'USD', uppercase: true, minlength: 3, maxlength: 3 },
+    catalogRetailerId: { type: String, default: null, trim: true },
     active: { type: Boolean, default: true },
   },
   { timestamps: true },
 );
 serviceSchema.index({ appId: 1, name: 1 }, { unique: true });
+serviceSchema.index(
+  { appId: 1, catalogRetailerId: 1 },
+  { unique: true, partialFilterExpression: { catalogRetailerId: { $type: 'string' } } },
+);
 
 const workingHoursSchema = new Schema(
   {

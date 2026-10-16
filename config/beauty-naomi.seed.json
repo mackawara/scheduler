@@ -17,7 +17,8 @@
       "bufferDurationMinutes": 15,
       "resourceType": "Stylist",
       "priceCents": 0,
-      "currency": "USD"
+      "currency": "USD",
+      "catalogRetailerId": "hair-wash"
     }
   ],
   "staff": [

@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 import type { ClientSession } from 'mongoose';
-import { buildAvailableSlots, type TimeRange } from '../domain/availability.js';
+import { buildAvailableSlots, mergeStaffSlots, type TimeRange } from '../domain/availability.js';
+import { localDateRange, localToday } from '../domain/dates.js';
 import { HttpError, notFound } from '../lib/errors.js';
 import { AppointmentModel, BlockedSlotModel, ServiceModel, StaffModel } from '../models.js';
 import { availabilityVersion, redis } from '../redis.js';
@@ -47,6 +48,30 @@ function localTime(date: string, time: string, zone: string): DateTime {
   return value;
 }
 
+/** The staff member's working-hour ranges on a local date, as UTC millisecond ranges. */
+export function workingWindows(
+  workingHours: StaffDocument['workingHours'],
+  date: string,
+  timezone: string,
+): TimeRange[] {
+  const day = parseLocalDate(date, timezone);
+  const dayOfWeek = day.weekday === 7 ? 0 : day.weekday;
+  return workingHours
+    .filter((hours) => hours.dayOfWeek === dayOfWeek)
+    .map((hours) => ({
+      startMs: localTime(date, hours.startsAt, timezone).toMillis(),
+      endMs: localTime(date, hours.endsAt, timezone).toMillis(),
+    }));
+}
+
+export function parseLocalDate(date: string, timezone: string): DateTime {
+  const day = DateTime.fromISO(date, { zone: timezone });
+  if (!day.isValid || day.toISODate() !== date) {
+    throw new HttpError(400, 'INVALID_DATE', 'date must be a valid YYYY-MM-DD value');
+  }
+  return day;
+}
+
 export async function getAvailability(
   tenant: AppTenant,
   input: {
@@ -58,10 +83,7 @@ export async function getAvailability(
   },
   session?: ClientSession,
 ): Promise<AvailabilityResult> {
-  const day = DateTime.fromISO(input.date, { zone: tenant.timezone });
-  if (!day.isValid || day.toISODate() !== input.date) {
-    throw new HttpError(400, 'INVALID_DATE', 'date must be a valid YYYY-MM-DD value');
-  }
+  const day = parseLocalDate(input.date, tenant.timezone);
 
   let cacheKey: string | null = null;
   if (!session && !input.excludeAppointmentId && !input.includePast && redis?.status === 'ready') {
@@ -92,13 +114,7 @@ export async function getAvailability(
     throw new HttpError(400, 'INCOMPATIBLE_STAFF', 'This staff member cannot perform the selected service');
   }
 
-  const dayOfWeek = day.weekday === 7 ? 0 : day.weekday;
-  const windows = staff.workingHours
-    .filter((hours) => hours.dayOfWeek === dayOfWeek)
-    .map((hours) => ({
-      startMs: localTime(input.date, hours.startsAt, tenant.timezone).toMillis(),
-      endMs: localTime(input.date, hours.endsAt, tenant.timezone).toMillis(),
-    }));
+  const windows = workingWindows(staff.workingHours, input.date, tenant.timezone);
 
   const dayStart = day.startOf('day').toUTC().toJSDate();
   const dayEnd = day.plus({ days: 1 }).startOf('day').toUTC().toJSDate();
@@ -170,4 +186,92 @@ export async function getAvailability(
     }
   }
   return result;
+}
+
+export type AnyStaffAvailabilityResult = Omit<AvailabilityResult, 'staff' | 'slots'> & {
+  staff: Array<{ id: string; name: string }>;
+  slots: Array<AvailableSlot & { staffIds: string[] }>;
+};
+
+/** Staff who can perform a service, in a stable order (by name). */
+export async function compatibleStaff(
+  tenant: AppTenant,
+  serviceId: string,
+): Promise<{ service: ServiceDocument; staff: StaffDocument[] }> {
+  const service = (await ServiceModel.findOne({ _id: serviceId, appId: tenant.id, active: true }).lean()) as
+    | ServiceDocument
+    | null;
+  if (!service) throw notFound('Service');
+  const staff = (await StaffModel.find({ appId: tenant.id, active: true, resourceType: service.resourceType })
+    .sort({ name: 1 })
+    .lean()) as StaffDocument[];
+  return { service, staff };
+}
+
+/** Availability for a service across every compatible staff member ("any available staff"). */
+export async function getAnyStaffAvailability(
+  tenant: AppTenant,
+  input: { serviceId: string; date: string },
+): Promise<AnyStaffAvailabilityResult> {
+  parseLocalDate(input.date, tenant.timezone);
+  const { service, staff } = await compatibleStaff(tenant, input.serviceId);
+  const perStaff = await Promise.all(
+    staff.map((member) =>
+      getAvailability(tenant, { staffId: member._id.toString(), serviceId: input.serviceId, date: input.date }),
+    ),
+  );
+  return {
+    date: input.date,
+    timezone: tenant.timezone,
+    staff: staff.map((member) => ({ id: member._id.toString(), name: member.name })),
+    service: {
+      id: service._id.toString(),
+      name: service.name,
+      baseDurationMinutes: service.baseDurationMinutes,
+      bufferDurationMinutes: service.bufferDurationMinutes,
+    },
+    slots: mergeStaffSlots(perStaff.map((result) => ({ staffId: result.staff.id, slots: result.slots }))),
+  };
+}
+
+export type DateSummary = {
+  timezone: string;
+  from: string;
+  days: number;
+  service: { id: string; name: string };
+  dates: Array<{ date: string; availableSlots: number }>;
+};
+
+/**
+ * Open-slot counts for a run of consecutive local dates. Each day/staff pair goes
+ * through getAvailability, so it shares that function's versioned Redis cache.
+ */
+export async function getAvailableDates(
+  tenant: AppTenant,
+  input: { serviceId: string; staffId?: string; from?: string; days: number; includeEmpty?: boolean },
+): Promise<DateSummary> {
+  const today = localToday(tenant.timezone);
+  const from = input.from ?? today;
+  parseLocalDate(from, tenant.timezone);
+  const { service, staff } = await compatibleStaff(tenant, input.serviceId);
+  const staffIds = input.staffId ? [input.staffId] : staff.map((member) => member._id.toString());
+
+  const dates = await Promise.all(
+    localDateRange(from, input.days, tenant.timezone).map(async (date) => {
+      if (date < today) return { date, availableSlots: 0 };
+      const perStaff = await Promise.all(
+        staffIds.map((staffId) => getAvailability(tenant, { staffId, serviceId: input.serviceId, date })),
+      );
+      const merged = mergeStaffSlots(perStaff.map((result) => ({ staffId: result.staff.id, slots: result.slots })));
+      return { date, availableSlots: merged.length };
+    }),
+  );
+
+  return {
+    timezone: tenant.timezone,
+    from,
+    days: input.days,
+    service: { id: service._id.toString(), name: service.name },
+    dates: input.includeEmpty ? dates : dates.filter((entry) => entry.availableSlots > 0),
+  };
 }

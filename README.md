@@ -46,7 +46,7 @@ Start a single-node MongoDB replica set (transactions require it) and Redis:
 docker compose up -d
 ```
 
-Edit [config/beauty-naomi.seed.json](./config/beauty-naomi.seed.json) with the confirmed salon address, catalog, prices, staff, and working hours. The included Hair Wash entry is only a starter based on the supplied specification.
+Edit [config/beauty-naomi.seed.json](./config/beauty-naomi.seed.json) with the confirmed salon address, catalog, prices, staff, and working hours. The included Hair Wash entry is only a starter based on the supplied specification. Set each service's `catalogRetailerId` to the **Content ID / retailer ID** of the matching product in the WhatsApp (Meta Commerce) catalog so the chatbot can map catalog orders to scheduler services.
 
 ```bash
 BEAUTY_NAOMI_ADMIN_PASSWORD='replace-with-a-strong-password' npm run seed:beauty-naomi
@@ -65,11 +65,24 @@ The seed prints the Beauty Naomi API key once. Save it in the chatbot as `SCHEDU
 
 All `/api/*` application routes require `x-api-key`.
 
-1. `GET /api/services`
-2. `GET /api/staff?serviceId=<id>`
-3. `GET /api/slots/available?staffId=<id>&serviceId=<id>&date=2026-09-01`
+1. `GET /api/services` (optionally `?catalogRetailerId=<WhatsApp product retailer id>` to resolve a catalog order to a service)
+2. `GET /api/staff?serviceId=<id>` (optional; skip it for "any available staff")
+3. `GET /api/slots/available?serviceId=<id>&date=2026-09-01[&staffId=<id>]`
 4. `POST /api/bookings/hold` with an `idempotency-key` header
 5. `POST /api/bookings/confirm`
+
+### Upcoming dates with availability
+
+`GET /api/availability/dates?serviceId=<id>[&from=YYYY-MM-DD][&days=14][&staffId=<id>][&includeEmpty=true]`
+
+Returns `{ timezone, from, days, service, dates: [{ date, availableSlots }] }` for consecutive local dates in the app timezone (`from` defaults to today, `days` defaults to 14, maximum 31). Only dates with at least one open slot are returned unless `includeEmpty=true`. Each day reuses the cached day availability, so blocks, holds and bookings invalidate it.
+
+### Any available staff
+
+`staffId` is optional on both `GET /api/slots/available` and `POST /api/bookings/hold`.
+
+- Without it, availability is the union of every active staff member whose `resourceType` matches the service, de-duplicated by start time; each slot lists the free staff in `staffIds`.
+- A hold without `staffId` assigns the compatible staff member with the fewest bookings that day who is still free (ties by name), retrying the next candidate if one is taken concurrently. The response contains the assigned `staffId`. Re-sending the same `idempotency-key` returns the original hold.
 
 Example hold:
 
@@ -106,12 +119,28 @@ Set `DEV_EXPOSE_OTP=true` only for local development. In production, OTP values 
 
 Login with `POST /api/admin/auth/login` and `{ appSlug, email, password }`. Use the returned bearer token for:
 
-- `POST /api/admin/services`
-- `POST /api/admin/staff`
+- `GET /api/admin/services[?includeInactive=true]`, `POST /api/admin/services`, `PATCH /api/admin/services/:id`
+- `GET /api/admin/staff[?includeInactive=true]`, `GET /api/admin/staff/:id`, `POST /api/admin/staff`, `PATCH /api/admin/staff/:id`
 - `PUT /api/admin/staff/:id/working-hours`
+- `GET /api/admin/schedule?staffId=<id>&date=YYYY-MM-DD[&serviceId=<id>]`
+- `GET /api/admin/block-slot?from=<ISO>&to=<ISO>[&staffId=<id>]`
 - `POST /api/admin/block-slot`
 - `DELETE /api/admin/block-slot/:id`
-- `GET /api/admin/bookings?from=<ISO>&to=<ISO>`
+- `GET /api/admin/bookings?from=<ISO>&to=<ISO>[&status=][&staffId=][&limit=50][&offset=0]` (includes the decrypted `customer` name/phone and `meta.total`)
+- `POST /api/admin/bookings/:id/cancel` with `{ "reason"?: "..." }`
+- `PATCH /api/admin/bookings/:id/reschedule` with `{ "newSlotStartTime": "<ISO with offset>" }` (admins may reschedule inside the customer reschedule cutoff)
+
+The admin booking actions need only the admin bearer token (no app API key), so the admin portal never holds the API key. They emit the same `BOOKING_CANCELLED` / `BOOKING_RESCHEDULED` webhook events as customer actions, so the chatbot can notify the customer.
+
+### Opening and blocking slots
+
+Working hours define which slots are open. Customers only ever see open slots, because availability subtracts blocks, live holds and bookings.
+
+- **Block** a slot (or any range) with `POST /api/admin/block-slot`. Blocking a range that overlaps a booking or live hold returns `409 BLOCK_CONFLICTS_WITH_BOOKING`.
+- **Open** a blocked slot again by deleting its block with `DELETE /api/admin/block-slot/:id`.
+- `GET /api/admin/schedule` returns every `slotIntervalMinutes` slot inside the staff member's working hours for that date with `status` `OPEN`, `BLOCKED`, `BOOKED` or `HELD` (precedence in that reverse order: `BOOKED` > `HELD` > `BLOCKED` > `OPEN`), `past`, and the related `blockId` / `bookingId` / `serviceName`. With `serviceId`, each slot also has `bookable`: whether that service can start there. The response also lists the raw `blocks` touching the day, since one block can span several slots.
+
+Service, staff and working-hour changes require the `ADMIN` role; `STAFF` users can read them. Set `active: false` with `PATCH` to retire a service or staff member (there is no hard delete). Duplicate names or catalog retailer IDs return `409`.
 
 Create another isolated app from the command line:
 

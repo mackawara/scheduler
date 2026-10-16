@@ -31,15 +31,17 @@ export class BeautyNaomiSchedulerClient {
     );
   }
 
-  availableSlots(staffId: string, serviceId: string, date: string) {
-    const query = new URLSearchParams({ staffId, serviceId, date });
-    return this.request<{ slots: Array<{ start: string; localStart: string }> }>(
+  /** Slots for one staff member, or for any compatible staff member when staffId is omitted. */
+  availableSlots(serviceId: string, date: string, staffId?: string) {
+    const query = new URLSearchParams({ serviceId, date, ...(staffId ? { staffId } : {}) });
+    return this.request<{ slots: Array<{ start: string; localStart: string; staffIds?: string[] }> }>(
       `/api/slots/available?${query}`,
     );
   }
 
+  /** Omit staffId to let the scheduler assign any free compatible staff member. */
   hold(input: {
-    staffId: string;
+    staffId?: string;
     serviceId: string;
     slotStartTime: string;
     customer: { name?: string; phone?: string; socialHandle?: string };

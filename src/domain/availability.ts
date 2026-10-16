@@ -48,3 +48,24 @@ export function buildAvailableSlots(input: AvailabilityInput): TimeRange[] {
   }
   return slots;
 }
+
+export type StaffSlotSet<T extends { start: string }> = { staffId: string; slots: T[] };
+
+/**
+ * Union of several staff members' slots, de-duplicated by start time.
+ * Each merged slot lists the staff who are free at that start, in input order.
+ */
+export function mergeStaffSlots<T extends { start: string }>(
+  sets: StaffSlotSet<T>[],
+): Array<T & { staffIds: string[] }> {
+  const byStart = new Map<number, T & { staffIds: string[] }>();
+  for (const set of sets) {
+    for (const slot of set.slots) {
+      const key = Date.parse(slot.start);
+      const existing = byStart.get(key);
+      if (existing) existing.staffIds.push(set.staffId);
+      else byStart.set(key, { ...slot, staffIds: [set.staffId] });
+    }
+  }
+  return [...byStart.entries()].sort(([a], [b]) => a - b).map(([, slot]) => slot);
+}
